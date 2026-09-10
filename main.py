@@ -32,6 +32,9 @@ from analytics.detection.execution_gaps import run_all_execution_gap_detectors
 from analytics.detection.negative_space import run_all_negative_space_detectors
 from analytics.scoring.benchmark import add_peer_group, percentile_rank_by_peer_group
 from analytics.scoring.score import build_finding_counts, compute_entity_risk_scores, score_breakdown_for_entity
+from analytics.review_queue import build_review_queue
+from analytics.llm_narration import narrate_queue
+from analytics.reporting import write_csv_exports, write_pdf_report
 
 
 def load_config(config_path: str) -> dict:
@@ -47,7 +50,8 @@ def df_records(df: pd.DataFrame) -> list:
     return clean.to_dict(orient="records")
 
 
-def run_pipeline(data_path: str, out_path: str, config_path: str):
+def run_pipeline(data_path: str, out_path: str, config_path: str,
+                  export_csv: bool = False, export_pdf: bool = False, narrate: bool = False):
     cfg = load_config(config_path)
     steps_completed = []
 
@@ -97,7 +101,7 @@ def run_pipeline(data_path: str, out_path: str, config_path: str):
     exec_gap_findings = run_all_execution_gap_detectors(alerts_enriched, data["cases"], cfg)
     done("Execution gaps detected")
 
-    neg_space_findings = run_all_negative_space_detectors(data, volume, categories, cfg)
+    neg_space_findings = run_all_negative_space_detectors(data, volume, categories, cfg, alerts_enriched)
     done("Negative-space findings detected")
     print()
 
@@ -112,6 +116,16 @@ def run_pipeline(data_path: str, out_path: str, config_path: str):
 
     total_findings = len(exec_gap_findings) + len(neg_space_findings)
     done("Findings generated")
+    print()
+
+    # ---- Supervisory review queue ----
+    review_queue = build_review_queue(exec_gap_findings, neg_space_findings, cfg)
+    review_queue_records = df_records(review_queue)
+    if narrate:
+        cfg.setdefault("llm_narration", {})["enabled"] = True
+        review_queue_records = narrate_queue(review_queue_records, cfg)
+        done("Review queue narrated (offline Qwen)")
+    done("Supervisory review queue built")
     print()
 
     # ---- Assemble entity-level assessments ----
@@ -168,6 +182,7 @@ def run_pipeline(data_path: str, out_path: str, config_path: str):
             ],
         },
         "entities": sorted(entity_assessments, key=lambda e: e["priority_rank"]),
+        "review_queue": review_queue_records,
     }
 
     os.makedirs(out_path, exist_ok=True)
@@ -178,15 +193,33 @@ def run_pipeline(data_path: str, out_path: str, config_path: str):
     print("Assessment complete.")
     print(f"\nOutput written to: {out_file}")
 
+    if export_csv:
+        csv_files = write_csv_exports(out_path, risk_scores, exec_gap_findings,
+                                       neg_space_findings, review_queue)
+        done("CSV exports written")
+        for f in csv_files:
+            print(f"  {f}")
+
+    if export_pdf:
+        pdf_file = write_pdf_report(out_path, assessment_results)
+        done("PDF executive summary written")
+        print(f"  {pdf_file}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="SAT-SA Analytics Engine v0.1")
     parser.add_argument("--data", default="./data/synthetic", help="Path to input dataset directory")
     parser.add_argument("--out", default="outputs", help="Path to write results")
     parser.add_argument("--config", default="config/assessment_rules.yaml", help="Path to rules config")
+    parser.add_argument("--export-csv", action="store_true", help="Also write flat CSV exports")
+    parser.add_argument("--export-pdf", action="store_true", help="Also write a PDF executive summary")
+    parser.add_argument("--narrate", action="store_true",
+                         help="Narrate the review queue via the offline Qwen layer "
+                              "(requires llm_narration.enabled: true in config and a running Ollama instance)")
     args = parser.parse_args()
 
-    run_pipeline(args.data, args.out, args.config)
+    run_pipeline(args.data, args.out, args.config,
+                 export_csv=args.export_csv, export_pdf=args.export_pdf, narrate=args.narrate)
 
 
 if __name__ == "__main__":

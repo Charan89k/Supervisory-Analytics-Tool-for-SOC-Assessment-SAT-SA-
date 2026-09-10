@@ -26,8 +26,14 @@ from analytics.detection.execution_gaps import (
     detect_missing_evidence,
     detect_reopened_cases,
     detect_repetitive_investigations,
+    detect_analyst_overload,
 )
-from analytics.detection.negative_space import detect_telemetry_gaps
+from analytics.detection.negative_space import (
+    detect_telemetry_gaps,
+    detect_missing_escalation_records,
+    detect_missing_investigations,
+)
+from analytics.review_queue import build_review_queue
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "assessment_rules.yaml")
 
@@ -277,3 +283,133 @@ def test_telemetry_gap_ignores_unexpected_sources(cfg):
     }])
     result = detect_telemetry_gaps(telemetry, cfg)
     assert result.empty
+
+
+# ---------------------------------------------------------------------------
+# ANALYST_OVERLOAD  (zscore_threshold=2.0)
+# ---------------------------------------------------------------------------
+
+def _workload_alerts(counts_by_analyst: dict) -> pd.DataFrame:
+    rows = []
+    for analyst_id, count in counts_by_analyst.items():
+        for i in range(count):
+            rows.append({
+                "alert_id": f"ALT-{analyst_id}-{i}", "soc_id": "SOC-TEST",
+                "assigned_analyst_id": analyst_id,
+                "ack_delay_minutes": 5.0, "investigation_duration_minutes": 30.0,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_analyst_overload_fires_for_clear_outlier(cfg):
+    # 8 peers at 5 alerts each plus one analyst at 60 -> zscore ~2.67,
+    # clearly above the 2.0 threshold. A smaller sample / milder outlier
+    # doesn't reliably clear the threshold because a single extreme value
+    # also inflates the sample std it's being measured against.
+    counts = {f"ANL-{i:03d}": 5 for i in range(1, 9)}
+    counts["ANL-OUTLIER"] = 60
+    alerts = _workload_alerts(counts)
+    result = detect_analyst_overload(alerts, cfg)
+    assert not result.empty
+    assert "ANL-OUTLIER" in set(result["assigned_analyst_id"])
+    assert (result["finding_type"] == "ANALYST_OVERLOAD").all()
+
+
+def test_analyst_overload_does_not_fire_on_even_distribution(cfg):
+    alerts = _workload_alerts({
+        "ANL-001": 10, "ANL-002": 11, "ANL-003": 9, "ANL-004": 10,
+    })
+    result = detect_analyst_overload(alerts, cfg)
+    assert result.empty
+
+
+# ---------------------------------------------------------------------------
+# MISSING_ESCALATION_RECORDS (negative space)
+# ---------------------------------------------------------------------------
+
+def test_missing_escalation_records_fires_with_no_escalation_data(cfg):
+    alerts = pd.DataFrame([
+        {"alert_id": "ALT-1", "soc_id": "SOC-TEST", "severity": "HIGH", "escalation_required": pd.NA},
+        {"alert_id": "ALT-2", "soc_id": "SOC-TEST", "severity": "CRITICAL", "escalation_required": pd.NA},
+    ])
+    result = detect_missing_escalation_records(alerts, cfg)
+    assert len(result) == 1
+    assert result.iloc[0]["finding_type"] == "MISSING_ESCALATION_RECORDS"
+    assert result.iloc[0]["soc_id"] == "SOC-TEST"
+
+
+def test_missing_escalation_records_does_not_fire_when_records_present(cfg):
+    alerts = pd.DataFrame([
+        {"alert_id": "ALT-1", "soc_id": "SOC-TEST", "severity": "HIGH", "escalation_required": True},
+        {"alert_id": "ALT-2", "soc_id": "SOC-TEST", "severity": "CRITICAL", "escalation_required": False},
+    ])
+    result = detect_missing_escalation_records(alerts, cfg)
+    assert result.empty
+
+
+def test_missing_escalation_records_ignores_socs_with_no_high_crit(cfg):
+    alerts = pd.DataFrame([
+        {"alert_id": "ALT-1", "soc_id": "SOC-TEST", "severity": "LOW", "escalation_required": pd.NA},
+    ])
+    result = detect_missing_escalation_records(alerts, cfg)
+    assert result.empty, "a SOC with no HIGH/CRITICAL alerts has nothing to escalate"
+
+
+# ---------------------------------------------------------------------------
+# MISSING_INVESTIGATIONS (negative space; min_cases=5, empty_fraction=0.5)
+# ---------------------------------------------------------------------------
+
+def test_missing_investigations_fires_above_empty_fraction(cfg):
+    cases = make_cases(
+        [{"case_id": f"CASE-{i}", "soc_id": "SOC-TEST", "investigation_notes": ""} for i in range(4)]
+        + [{"case_id": f"CASE-{i}", "soc_id": "SOC-TEST", "investigation_notes": "Reviewed."} for i in range(4, 6)]
+    )
+    result = detect_missing_investigations(cases, cfg)
+    assert len(result) == 1
+    assert result.iloc[0]["finding_type"] == "MISSING_INVESTIGATIONS"
+
+
+def test_missing_investigations_does_not_fire_below_empty_fraction(cfg):
+    cases = make_cases(
+        [{"case_id": f"CASE-{i}", "soc_id": "SOC-TEST", "investigation_notes": ""} for i in range(2)]
+        + [{"case_id": f"CASE-{i}", "soc_id": "SOC-TEST", "investigation_notes": "Reviewed."} for i in range(2, 6)]
+    )
+    result = detect_missing_investigations(cases, cfg)
+    assert result.empty
+
+
+def test_missing_investigations_ignores_small_soc(cfg):
+    # all notes empty, but below missing_investigation_min_cases=5
+    cases = make_cases(
+        [{"case_id": f"CASE-{i}", "soc_id": "SOC-TEST", "investigation_notes": ""} for i in range(3)]
+    )
+    result = detect_missing_investigations(cases, cfg)
+    assert result.empty, "too few cases to draw a record-keeping conclusion"
+
+
+# ---------------------------------------------------------------------------
+# Supervisory review queue
+# ---------------------------------------------------------------------------
+
+def test_review_queue_ranks_by_weight_and_severity(cfg):
+    exec_findings = pd.DataFrame([
+        {"soc_id": "SOC-1", "finding_type": "MISSED_ESCALATION", "rule_id": "ESC-REQUIRED-001",
+         "severity": "CRITICAL", "alert_id": "ALT-1", "case_id": "CASE-1",
+         "assigned_analyst_id": "ANL-1", "rationale": "r1", "evidence": {}},
+        {"soc_id": "SOC-2", "finding_type": "REOPENED_CASE", "rule_id": "REOPEN-001",
+         "severity": "LOW", "alert_id": "ALT-2", "case_id": "CASE-2",
+         "assigned_analyst_id": "ANL-2", "rationale": "r2", "evidence": {}},
+    ])
+    neg_findings = pd.DataFrame()
+    queue = build_review_queue(exec_findings, neg_findings, cfg)
+
+    assert len(queue) == 2
+    # missed_escalation (weight 3.0) x CRITICAL boost should clearly outrank
+    # reopened_case (weight 1.0) x LOW boost
+    assert queue.iloc[0]["finding_type"] == "MISSED_ESCALATION"
+    assert list(queue["queue_rank"]) == [1, 2]
+
+
+def test_review_queue_empty_when_no_findings(cfg):
+    queue = build_review_queue(pd.DataFrame(), pd.DataFrame(), cfg)
+    assert queue.empty

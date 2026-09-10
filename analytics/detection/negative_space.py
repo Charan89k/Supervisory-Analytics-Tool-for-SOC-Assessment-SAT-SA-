@@ -106,12 +106,98 @@ def detect_low_activity_outliers(alert_volume_by_soc: pd.DataFrame, cfg: dict) -
     return flagged[["soc_id", "alert_count", "finding_type", "rule_id", "rationale"]]
 
 
+def detect_missing_escalation_records(alerts_enriched: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """
+    Flags entities where HIGH/CRITICAL alerts exist but NO escalation
+    record of any kind (required or not) is present for the whole SOC.
+    This is deliberately distinct from MISSED_ESCALATION (an execution
+    gap, where a specific alert's escalation record shows it should
+    have escalated but didn't): this rule catches the absence case —
+    a SOC that doesn't appear to keep escalation records at all, which
+    a per-alert rule can never surface because there's no row to flag.
+    """
+    required_severities = cfg["escalation"]["required_severities"]
+    high_crit = alerts_enriched[alerts_enriched["severity"].isin(required_severities)]
+    if high_crit.empty:
+        return pd.DataFrame()
+
+    has_any_escalation_data = alerts_enriched["escalation_required"].notna()
+    socs_with_records = set(alerts_enriched.loc[has_any_escalation_data, "soc_id"].unique())
+    socs_with_high_crit = set(high_crit["soc_id"].unique())
+    missing_socs = socs_with_high_crit - socs_with_records
+
+    if not missing_socs:
+        return pd.DataFrame()
+
+    findings = []
+    for soc_id in missing_socs:
+        count = len(high_crit[high_crit["soc_id"] == soc_id])
+        findings.append({
+            "soc_id": soc_id,
+            "finding_type": "MISSING_ESCALATION_RECORDS",
+            "rule_id": "ESCALATION-RECORDKEEPING-001",
+            "rationale": (
+                f"{count} HIGH/CRITICAL alert(s) exist for this entity but no "
+                "escalation record of any kind was found for the assessment "
+                "period — a potential gap in escalation record-keeping, "
+                "distinct from any single alert failing to escalate."
+            ),
+            "evidence": {"high_critical_alert_count": count, "escalation_records_found": 0},
+        })
+    return pd.DataFrame(findings)
+
+
+def detect_missing_investigations(cases: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """
+    Flags entities where a strong majority of cases carry no
+    investigation notes at all (as opposed to REPETITIVE_INVESTIGATION,
+    which fires on duplicate-but-present notes). Absence of any note
+    text is a negative-space signal — there's no record to point a
+    per-case rule at.
+    """
+    if cases.empty or "investigation_notes" not in cases.columns:
+        return pd.DataFrame()
+
+    min_case_count = cfg["negative_space"].get("missing_investigation_min_cases", 5)
+    empty_fraction_threshold = cfg["negative_space"].get("missing_investigation_empty_fraction", 0.5)
+
+    findings = []
+    for soc_id, group in cases.groupby("soc_id"):
+        if len(group) < min_case_count:
+            continue
+        notes = group["investigation_notes"].fillna("").astype(str).str.strip()
+        empty_fraction = (notes == "").mean()
+        if empty_fraction < empty_fraction_threshold:
+            continue
+        findings.append({
+            "soc_id": soc_id,
+            "finding_type": "MISSING_INVESTIGATIONS",
+            "rule_id": "INVESTIGATION-RECORDKEEPING-001",
+            "rationale": (
+                f"{round(empty_fraction * 100, 1)}% of cases for this entity "
+                f"have no investigation notes at all, above the "
+                f"{round(empty_fraction_threshold * 100, 1)}% threshold — a "
+                "potential investigation record-keeping gap."
+            ),
+            "evidence": {
+                "case_count": int(len(group)),
+                "empty_investigation_fraction": round(empty_fraction, 3),
+                "threshold_fraction": empty_fraction_threshold,
+            },
+        })
+    return pd.DataFrame(findings)
+
+
 def run_all_negative_space_detectors(data: dict, alert_volume_by_soc: pd.DataFrame,
-                                       alert_categories_by_soc: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+                                       alert_categories_by_soc: pd.DataFrame, cfg: dict,
+                                       alerts_enriched: pd.DataFrame = None) -> pd.DataFrame:
     frames = [
         detect_telemetry_gaps(data["telemetry"], cfg),
         detect_missing_categories(alert_categories_by_soc, cfg),
         detect_low_activity_outliers(alert_volume_by_soc, cfg),
+        detect_missing_investigations(data.get("cases", pd.DataFrame()), cfg),
     ]
+    if alerts_enriched is not None:
+        frames.append(detect_missing_escalation_records(alerts_enriched, cfg))
     frames = [f for f in frames if not f.empty]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

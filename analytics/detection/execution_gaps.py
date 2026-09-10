@@ -24,6 +24,8 @@ without ever being the thing that decides whether a gap occurred.
 
 import pandas as pd
 
+from analytics.metrics.analyst_metrics import analyst_workload, flag_overloaded_analysts
+
 
 def detect_missed_escalations(alerts_enriched: pd.DataFrame) -> pd.DataFrame:
     df = alerts_enriched[
@@ -208,6 +210,45 @@ def detect_repetitive_investigations(cases: pd.DataFrame, cfg: dict) -> pd.DataF
     return pd.DataFrame(findings)
 
 
+def detect_analyst_overload(alerts_enriched: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """
+    Flags analysts whose alert volume is a statistical outlier relative
+    to peers within the same SOC. This wraps the ANALYST_OVERLOAD metric
+    from analyst_metrics into a proper finding so it participates in
+    scoring and the review queue like every other execution-gap rule,
+    rather than existing only as a dashboard-side statistic.
+
+    Emitted at the (soc_id, analyst_id) grain, not per-alert — one
+    finding per overloaded analyst, evidenced by their workload z-score.
+    """
+    threshold = cfg["execution_gaps"].get("analyst_overload_zscore_threshold", 2.0)
+    workload = analyst_workload(alerts_enriched)
+    flagged_workload = flag_overloaded_analysts(workload, zscore_threshold=threshold)
+    flagged = flagged_workload[flagged_workload["overloaded"] == True].copy()  # noqa: E712
+
+    if flagged.empty:
+        return pd.DataFrame()
+
+    flagged["finding_type"] = "ANALYST_OVERLOAD"
+    flagged["rule_id"] = "WORKLOAD-ZSCORE-001"
+    flagged["alert_id"] = pd.NA
+    flagged["case_id"] = pd.NA
+    flagged["severity"] = pd.NA
+    flagged["rationale"] = (
+        "Analyst handled " + flagged["alerts_handled"].astype(str)
+        + " alerts, " + flagged["workload_zscore"].round(2).astype(str)
+        + " standard deviations above the peer mean for this SOC — a potential "
+        "workload-imbalance concern, not a performance judgement on its own."
+    )
+    flagged["evidence"] = flagged.apply(lambda r: {
+        "alerts_handled": int(r["alerts_handled"]),
+        "workload_zscore": round(r["workload_zscore"], 2),
+        "zscore_threshold": threshold,
+    }, axis=1)
+    return flagged[["alert_id", "case_id", "soc_id", "assigned_analyst_id", "severity",
+                     "finding_type", "rule_id", "rationale", "evidence"]]
+
+
 def run_all_execution_gap_detectors(alerts_enriched: pd.DataFrame, cases: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     frames = [
         detect_missed_escalations(alerts_enriched),
@@ -216,6 +257,7 @@ def run_all_execution_gap_detectors(alerts_enriched: pd.DataFrame, cases: pd.Dat
         detect_missing_evidence(alerts_enriched),
         detect_reopened_cases(alerts_enriched),
         detect_repetitive_investigations(cases, cfg),
+        detect_analyst_overload(alerts_enriched, cfg),
     ]
     frames = [f for f in frames if not f.empty]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

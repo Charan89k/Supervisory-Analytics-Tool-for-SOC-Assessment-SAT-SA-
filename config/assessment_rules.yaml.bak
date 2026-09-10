@@ -100,8 +100,4 @@ llm_narration:
   provider: "ollama"
   base_url: "http://localhost:11434"
   model: "qwen2.5:14b"
-  # 180s, not 30s: on CPU-only hardware a single 14B-model call can
-  # take a few minutes. A tight timeout here silently falls back to
-  # the rule rationale instead of erroring, so a too-short value
-  # quietly discards every narration without telling you.
-  timeout_seconds: 180
+  timeout_seconds: 30

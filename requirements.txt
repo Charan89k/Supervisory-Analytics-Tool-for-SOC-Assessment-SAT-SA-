@@ -1,0 +1,7 @@
+pandas
+pyyaml
+streamlit
+plotly
+pytest
+reportlab
+requests

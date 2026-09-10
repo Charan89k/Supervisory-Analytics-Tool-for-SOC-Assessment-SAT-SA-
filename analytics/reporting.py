@@ -1,0 +1,246 @@
+"""
+Reporting layer for SAT-SA.
+
+Takes the already-computed assessment (entity risk scores, findings,
+review queue) and writes it out in the formats a supervisor actually
+shares: CSV tables for spreadsheet work, and a one-page-per-entity
+PDF executive summary. JSON output (the full-fidelity machine-readable
+record) is written directly by main.py — this module covers the two
+human-facing export formats.
+"""
+
+import os
+
+import pandas as pd
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak,
+)
+
+
+def write_csv_exports(out_path: str, risk_scores: pd.DataFrame,
+                       exec_gap_findings: pd.DataFrame, neg_space_findings: pd.DataFrame,
+                       review_queue: pd.DataFrame) -> list:
+    """Writes the four flat CSV exports supervisors ask for; returns the file paths written."""
+    os.makedirs(out_path, exist_ok=True)
+    written = []
+
+    exports = {
+        "entity_risk_scores.csv": risk_scores,
+        "execution_gap_findings.csv": exec_gap_findings,
+        "negative_space_findings.csv": neg_space_findings,
+        "review_queue.csv": review_queue,
+    }
+    for filename, df in exports.items():
+        file_path = os.path.join(out_path, filename)
+        if df is None or df.empty:
+            pd.DataFrame().to_csv(file_path, index=False)
+        else:
+            # evidence dicts don't round-trip cleanly to CSV — stringify them
+            safe_df = df.copy()
+            if "evidence" in safe_df.columns:
+                safe_df["evidence"] = safe_df["evidence"].apply(str)
+            safe_df.to_csv(file_path, index=False)
+        written.append(file_path)
+
+    return written
+
+
+def _entity_table(entity: dict, styles) -> Table:
+    rows = [["Metric", "Value"]]
+    rows.append(["Priority rank", str(entity.get("priority_rank"))])
+    rows.append(["Supervisory risk score", f"{entity.get('supervisory_risk_score', 0):.2f}"])
+    rows.append(["Percentile (peer group)", f"{entity.get('supervisory_risk_score_percentile', 0):.1f}%"])
+    rows.append(["Peer group", str(entity.get("peer_group", "all"))])
+    rows.append(["Execution gap findings", str(entity.get("execution_gap_count", 0))])
+    rows.append(["Negative space findings", str(entity.get("negative_space_count", 0))])
+
+    table = Table(rows, colWidths=[2.5 * inch, 2.5 * inch])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
+    ]))
+    return table
+
+
+def _ranking_table(entities: list) -> Table:
+    rows = [["Rank", "SOC", "Organization", "Sector", "Risk Score", "Percentile", "Findings"]]
+    for entity in entities:
+        rows.append([
+            str(entity.get("priority_rank")),
+            entity.get("soc_id", ""),
+            entity.get("organization_name", ""),
+            str(entity.get("peer_group", "all")),
+            f"{entity.get('supervisory_risk_score', 0):.1f}",
+            f"{entity.get('supervisory_risk_score_percentile', 0):.0f}%",
+            str(entity.get("execution_gap_count", 0) + entity.get("negative_space_count", 0)),
+        ])
+
+    table = Table(rows, colWidths=[0.5 * inch, 0.8 * inch, 1.7 * inch, 0.9 * inch, 0.8 * inch, 0.75 * inch, 0.65 * inch])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
+    ]))
+    return table
+
+
+def _risk_drivers_table(entity: dict) -> Table:
+    breakdown = [c for c in entity.get("score_breakdown", []) if c.get("contribution", 0) > 0]
+    breakdown = sorted(breakdown, key=lambda c: c.get("contribution", 0), reverse=True)
+
+    rows = [["Finding Type", "Raw Count", "Weight", "Contribution"]]
+    for component in breakdown[:8]:
+        rows.append([
+            component.get("finding_type", "").replace("_", " ").title(),
+            str(component.get("raw_count", 0)),
+            f"{component.get('weight', 0):.2f}",
+            f"{component.get('contribution', 0):.2f}",
+        ])
+
+    table = Table(rows, colWidths=[2.2 * inch, 0.9 * inch, 0.8 * inch, 1.1 * inch])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#5f3a1f")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
+    ]))
+    return table
+
+
+def _findings_section(findings: list, heading: str, styles, body_style, limit: int = 5) -> list:
+    elements = [Paragraph(heading, styles["Heading4"])]
+    if not findings:
+        elements.append(Paragraph("None recorded.", body_style))
+        return elements
+
+    for finding in findings[:limit]:
+        label = finding.get("finding_type", "").replace("_", " ").title()
+        severity = finding.get("severity", "")
+        elements.append(Paragraph(
+            f"<b>{label}</b>"
+            + (f" ({severity})" if severity else "")
+            + f" — {finding.get('rationale', '')}",
+            body_style,
+        ))
+        evidence = finding.get("evidence", {})
+        if evidence:
+            evidence_str = ", ".join(f"{k}: {v}" for k, v in evidence.items())
+            elements.append(Paragraph(f"<i>Evidence — {evidence_str}</i>", body_style))
+
+    if len(findings) > limit:
+        elements.append(Paragraph(
+            f"...and {len(findings) - limit} more (see full JSON/CSV export).",
+            body_style,
+        ))
+    return elements
+
+
+def write_pdf_report(out_path: str, assessment_results: dict) -> str:
+    """
+    Writes the SOC assessment report as: Executive Summary -> Entity
+    Ranking -> one section per entity covering Major Execution Gaps,
+    Negative Space, Evidence, and Risk Drivers. Recommended Actions is
+    intentionally omitted until the Qwen narration layer is wired in —
+    there is no recommendation-generation logic in the pipeline yet,
+    and a placeholder would misrepresent what the tool currently does.
+    """
+    os.makedirs(out_path, exist_ok=True)
+    file_path = os.path.join(out_path, "executive_summary.pdf")
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("SATSATitle", parent=styles["Title"], fontSize=20)
+    h2_style = ParagraphStyle("SATSAH2", parent=styles["Heading2"], spaceBefore=10, spaceAfter=4)
+    body_style = ParagraphStyle("SATSABody", parent=styles["BodyText"], fontSize=9, leading=12)
+    caption_style = ParagraphStyle("SATSACaption", parent=styles["BodyText"], fontSize=8,
+                                    textColor=colors.grey)
+
+    doc = SimpleDocTemplate(file_path, pagesize=letter,
+                             topMargin=0.6 * inch, bottomMargin=0.6 * inch)
+    story = []
+
+    metadata = assessment_results.get("run_metadata", {})
+    entities = assessment_results.get("entities", [])
+
+    # ---- Executive Summary ----
+    story.append(Paragraph("SAT-SA Supervisory Assessment — Executive Summary", title_style))
+    story.append(Paragraph(
+        f"Entities assessed: {metadata.get('entities_assessed', len(entities))} &nbsp;|&nbsp; "
+        f"Alerts reviewed: {metadata.get('total_alerts', 0):,} &nbsp;|&nbsp; "
+        f"Total findings: {metadata.get('total_findings', 0):,}",
+        caption_style,
+    ))
+    story.append(Paragraph(
+        "Findings below are evidence-based indicators produced by deterministic rules. "
+        "They require supervisory review and are not, on their own, determinations of "
+        "wrongdoing or performance failure. Risk percentiles are computed within each "
+        "entity's peer group (sector), not against the full dataset.",
+        caption_style,
+    ))
+    if entities:
+        highest = entities[0]
+        story.append(Paragraph(
+            f"Highest-priority entity: <b>{highest.get('organization_name', highest.get('soc_id'))}</b> "
+            f"({highest.get('soc_id')}), risk score {highest.get('supervisory_risk_score', 0):.1f}, "
+            f"{highest.get('execution_gap_count', 0) + highest.get('negative_space_count', 0)} total findings.",
+            body_style,
+        ))
+    story.append(Spacer(1, 0.15 * inch))
+
+    # ---- Entity Ranking ----
+    story.append(Paragraph("Entity Ranking", h2_style))
+    if entities:
+        story.append(_ranking_table(entities))
+    else:
+        story.append(Paragraph("No entities assessed.", body_style))
+    story.append(PageBreak())
+
+    # ---- Per-entity: Major Execution Gaps / Negative Space / Evidence / Risk Drivers ----
+    for entity in entities:
+        story.append(Paragraph(
+            f"{entity.get('priority_rank')}. {entity.get('organization_name', entity.get('soc_id'))} "
+            f"({entity.get('soc_id')})",
+            h2_style,
+        ))
+        story.append(_entity_table(entity, styles))
+        story.append(Spacer(1, 0.12 * inch))
+
+        exec_findings = entity.get("execution_gap_findings", [])
+        neg_findings = entity.get("negative_space_findings", [])
+
+        story.append(Spacer(1, 0.08 * inch))
+        story.extend(_findings_section(
+            exec_findings, "Major Execution Gaps", styles, body_style,
+        ))
+
+        story.append(Spacer(1, 0.1 * inch))
+        story.extend(_findings_section(
+            neg_findings, "Negative Space", styles, body_style,
+        ))
+
+        story.append(Spacer(1, 0.1 * inch))
+        story.append(Paragraph("Risk Drivers", styles["Heading4"]))
+        if entity.get("score_breakdown"):
+            story.append(_risk_drivers_table(entity))
+        else:
+            story.append(Paragraph("No score breakdown available.", body_style))
+
+        story.append(PageBreak())
+
+    if story and isinstance(story[-1], PageBreak):
+        story.pop()
+
+    doc.build(story)
+    return file_path

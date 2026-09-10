@@ -85,41 +85,6 @@ streamlit run app.py
   `llm_narration` in the config; falls back to the rule-generated
   rationale if unavailable)
 
-## Offline LLM narration — a deliberate design tradeoff
-
-The Qwen narration layer is optional, offline, and disposable by
-design — not something bolted on to work around a limitation:
-
-- **Never load-bearing.** Every finding already has a deterministic,
-  rule-generated `rationale` before narration ever runs. Narration
-  only restates that rationale in clearer prose for a human reviewer;
-  it never decides a finding, changes a `finding_type`/`rule_id`, or
-  touches a risk score. Disable it entirely and the pipeline output
-  is identical in substance, just less polished in wording.
-- **Fails silently, by design.** If Ollama isn't installed, the model
-  isn't pulled, or a call times out, `llm_narration.py` catches the
-  failure and returns the rule-generated rationale untouched — no
-  crash, no broken pipeline run, no visible error. This is
-  intentional: a UX nicety should never be able to take down the
-  core analytics.
-- **Offline means local compute, not local speed.** Running Qwen
-  through Ollama keeps the data on-machine and avoids any external
-  API calls, which matters for a security-supervisory tool. It does
-  *not* mean fast — a 14B-parameter model does the same matrix math
-  locally that it would in the cloud, just on whatever CPU/GPU is in
-  the laptop running it. On CPU-only hardware, expect on the order of
-  minutes per finding, not seconds.
-- **Precompute, don't demo live.** Because of the above, the intended
-  workflow is to run `python main.py --narrate` once, ahead of time,
-  on a machine that has Qwen pulled, and ship the resulting
-  `assessment_results.json` (with `narrated_explanation` fields
-  already populated) as part of the submission — rather than asking
-  a judge's machine to reproduce the narration step live. The
-  dashboard and core pipeline run in seconds on any machine with
-  Python installed, with zero setup beyond `pip install -r
-  requirements.txt`; narration is a separate, optional enhancement
-  layered on top of that baseline, not a dependency of it.
-
 ## Synthetic data & ground truth
 
 `data/generator/generate_dataset.py` seeds each SOC with one of five

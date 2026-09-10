@@ -1,6 +1,0 @@
-soc_id,organization_name,sector,organization_size,assessment_period_start,assessment_period_end,soc_maturity_level,analyst_count,shift_count,criticality
-SOC-001,Alpha Health Corp,Power,Small,2026-01-01T00:00:00Z,2026-01-15T00:00:00Z,1,11,3,Medium
-SOC-002,Meridian Power Ltd,Government,Small,2026-01-01T00:00:00Z,2026-01-15T00:00:00Z,2,24,3,Medium
-SOC-003,Delta Refinery Ltd,Oil & Gas,Medium,2026-01-01T00:00:00Z,2026-01-15T00:00:00Z,4,9,3,Critical
-SOC-004,Satpura Systems Group,Healthcare,Medium,2026-01-01T00:00:00Z,2026-01-15T00:00:00Z,5,13,3,High
-SOC-005,Kaveri Refinery Corp,Transport,Large,2026-01-01T00:00:00Z,2026-01-15T00:00:00Z,3,14,3,Critical

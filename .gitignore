@@ -5,3 +5,8 @@ __pycache__/
 .env
 .env.*
 .DS_Store
+data/synthetic/
+outputs/*.json
+outputs/*.csv
+outputs/*.pdf
+!outputs/.gitkeep
