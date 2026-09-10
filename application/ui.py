@@ -2,7 +2,13 @@ from pathlib import Path
 import json
 
 from PySide6.QtCore import QByteArray, Qt, QThread, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QDesktopServices,
+    QFont,
+    QKeySequence,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -30,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from analytics.narration.base import STATE_DISABLED, BackendStatus
 from analytics.ingestion import describe_supported_inputs
+from application.services import dashboard_service
 from application.session import Phase, SessionState
 from application.version import (
     APP_FULL_NAME,
@@ -42,6 +49,7 @@ from application.narration_worker import NarrationWorker
 from application.pages.settings_page import SettingsPage
 from application.services.narration_service import NarrationService
 from application.services.settings_service import SettingsService
+from application.widgets.charts import make_bar_chart, severity_color
 from application.widgets.drop_zone import DropZone
 from application.worker import AssessmentWorker, ValidationWorker
 from application.services.ai_config import AIConfig, create_ai_config
@@ -520,105 +528,187 @@ class MainWindow(QMainWindow):
     # ============================================================
 
     def build_dashboard_page(self):
-        page = QWidget()
+        """
+        The supervisory dashboard, organised around the four questions a
+        supervisor actually arrives with:
 
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(35, 30, 35, 30)
-        layout.setSpacing(20)
+            WHO needs attention  -> entity risk ranking
+            WHY                  -> risk drivers for the selected entity
+            WHAT EVIDENCE        -> severity and category distribution
+            WHAT TO REVIEW       -> top of the review queue
+
+        Selecting a row in the ranking updates the WHY and WHAT EVIDENCE
+        panels, so the page reads as one movement from "which entity" to
+        "on what basis" rather than as unrelated tiles.
+        """
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(30, 22, 30, 22)
+        outer.setSpacing(14)
 
         header = QLabel("Supervisory Dashboard")
         header.setObjectName("page_title")
+        outer.addWidget(header)
 
         description = QLabel(
-            "Entity-level cyber resilience assessment and supervisory risk overview."
+            "Supervisory analytics over submitted SOC records. This tool "
+            "assesses how an entity ran its own security operations; it "
+            "is not a SOC, a SIEM, or a monitoring system, and nothing "
+            "here is live."
         )
         description.setObjectName("page_description")
+        description.setWordWrap(True)
+        outer.addWidget(description)
 
-        layout.addWidget(header)
-        layout.addWidget(description)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(0, 0, 12, 0)
+        layout.setSpacing(16)
 
-        self.dashboard_status = QLabel(
-            "No assessment loaded."
-        )
+        self.dashboard_status = QLabel("No assessment loaded.")
         self.dashboard_status.setObjectName("status_label")
-
         layout.addWidget(self.dashboard_status)
 
-        # KPI row
-        kpi_layout = QHBoxLayout()
-        kpi_layout.setSpacing(15)
+        # ---- Executive overview -----------------------------------
+        layout.addWidget(self.section_title("Executive Overview"))
 
-        self.kpi_socs = self.make_kpi_card(
-            "SOC Entities",
-            "0",
-        )
+        kpi_row_one = QHBoxLayout()
+        kpi_row_one.setSpacing(12)
+        self.kpi_socs = self.make_kpi_card("SOC Entities", "0")
+        self.kpi_findings = self.make_kpi_card("Total Findings", "0")
+        self.kpi_execution = self.make_kpi_card("Execution Gaps", "0")
+        self.kpi_negative = self.make_kpi_card("Negative Space", "0")
+        for card in (self.kpi_socs, self.kpi_findings,
+                      self.kpi_execution, self.kpi_negative):
+            kpi_row_one.addWidget(card)
+        layout.addLayout(kpi_row_one)
 
-        self.kpi_findings = self.make_kpi_card(
-            "Total Findings",
-            "0",
-        )
+        kpi_row_two = QHBoxLayout()
+        kpi_row_two.setSpacing(12)
+        self.kpi_critical = self.make_kpi_card("Critical Findings", "0")
+        self.kpi_high = self.make_kpi_card("High Findings", "0")
+        self.kpi_anomalies = self.make_kpi_card("Anomalies", "0")
+        self.kpi_review = self.make_kpi_card("Priority Reviews", "0")
+        self.kpi_explained = self.make_kpi_card("AI Explained", "0")
+        for card in (self.kpi_critical, self.kpi_high, self.kpi_anomalies,
+                      self.kpi_review, self.kpi_explained):
+            kpi_row_two.addWidget(card)
+        layout.addLayout(kpi_row_two)
 
-        self.kpi_execution = self.make_kpi_card(
-            "Execution Gaps",
-            "0",
-        )
-
-        self.kpi_negative = self.make_kpi_card(
-            "Negative Space",
-            "0",
-        )
-
-        self.kpi_review = self.make_kpi_card(
-            "Review Queue",
-            "0",
-        )
-
-        self.kpi_explained = self.make_kpi_card(
-            "AI Explained",
-            "0",
-        )
-
-        kpi_layout.addWidget(self.kpi_socs)
-        kpi_layout.addWidget(self.kpi_findings)
-        kpi_layout.addWidget(self.kpi_execution)
-        kpi_layout.addWidget(self.kpi_negative)
-        kpi_layout.addWidget(self.kpi_review)
-        kpi_layout.addWidget(self.kpi_explained)
-
-        layout.addLayout(kpi_layout)
-
-        # Risk table
-        risk_title = QLabel("SOC Risk Ranking")
-        risk_title.setObjectName("section_title")
-
-        layout.addWidget(risk_title)
+        # ---- WHO ---------------------------------------------------
+        layout.addWidget(self.section_title(
+            "Entity Risk Ranking", "Which entities need supervisory attention"))
 
         self.risk_table = QTableWidget()
-        self.risk_table.setColumnCount(6)
-        self.risk_table.setHorizontalHeaderLabels(
-            [
-                "Rank",
-                "SOC",
-                "Organization",
-                "Peer Group",
-                "Risk Score",
-                "Execution Gaps",
-            ]
-        )
-
-        self.risk_table.setEditTriggers(
-            QTableWidget.NoEditTriggers
-        )
-        self.risk_table.setSelectionBehavior(
-            QTableWidget.SelectRows
-        )
-        self.risk_table.horizontalHeader().setStretchLastSection(
-            True
-        )
-
+        self.risk_table.setColumnCount(9)
+        self.risk_table.setHorizontalHeaderLabels([
+            "Rank", "Entity", "Organization", "Peer Group", "Risk Score",
+            "Percentile", "vs Peers", "Critical", "High",
+        ])
+        self.risk_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.risk_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.risk_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.risk_table.verticalHeader().setVisible(False)
+        self.risk_table.horizontalHeader().setStretchLastSection(True)
+        self.risk_table.setMinimumHeight(190)
+        self.risk_table.itemSelectionChanged.connect(self.dashboard_entity_changed)
         layout.addWidget(self.risk_table)
 
+        self.peer_note = QLabel("")
+        self.peer_note.setObjectName("caveat")
+        self.peer_note.setWordWrap(True)
+        layout.addWidget(self.peer_note)
+
+        # ---- WHY + WHAT EVIDENCE -----------------------------------
+        self.driver_title = self.section_title(
+            "Risk Drivers & Evidence",
+            "Why the selected entity ranks where it does — both panels "
+            "follow the row selected above")
+        layout.addWidget(self.driver_title)
+
+        panels = QHBoxLayout()
+        panels.setSpacing(14)
+
+        driver_panel = QFrame()
+        driver_panel.setObjectName("panel")
+        driver_layout = QVBoxLayout(driver_panel)
+        self.driver_chart = make_bar_chart(
+            "Score contribution by finding type", height=210)
+        driver_layout.addWidget(self.driver_chart)
+        self.driver_note = QLabel("")
+        self.driver_note.setObjectName("caveat")
+        self.driver_note.setWordWrap(True)
+        driver_layout.addWidget(self.driver_note)
+        panels.addWidget(driver_panel, 5)
+
+        distribution_panel = QFrame()
+        distribution_panel.setObjectName("panel")
+        distribution_layout = QVBoxLayout(distribution_panel)
+        self.severity_chart = make_bar_chart(
+            "Findings by severity", height=170, left_margin=58)
+        self.category_chart = make_bar_chart(
+            "Findings by category", height=110, left_margin=58)
+        distribution_layout.addWidget(self.severity_chart)
+        distribution_layout.addWidget(self.category_chart)
+        panels.addWidget(distribution_panel, 4)
+
+        layout.addLayout(panels)
+
+        # ---- WHAT TO REVIEW ----------------------------------------
+        layout.addWidget(self.section_title(
+            "Priority Review Queue",
+            "Where a supervisor should spend manual review effort first"))
+
+        self.review_preview_table = QTableWidget()
+        self.review_preview_table.setColumnCount(6)
+        self.review_preview_table.setHorizontalHeaderLabels([
+            "Rank", "Entity", "Severity", "Finding", "Rule",
+            "Why prioritised",
+        ])
+        self.review_preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.review_preview_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.review_preview_table.verticalHeader().setVisible(False)
+        self.review_preview_table.horizontalHeader().setStretchLastSection(True)
+        self.review_preview_table.setMinimumHeight(230)
+        layout.addWidget(self.review_preview_table)
+
+        open_queue = QPushButton("Open full review queue")
+        open_queue.setCursor(Qt.PointingHandCursor)
+        open_queue.clicked.connect(lambda: self.show_page(3))
+        layout.addWidget(open_queue, 0, Qt.AlignLeft)
+
+        # ---- Trends -------------------------------------------------
+        layout.addWidget(self.section_title("Trends"))
+        self.trend_note = QLabel("")
+        self.trend_note.setObjectName("caveat")
+        self.trend_note.setWordWrap(True)
+        layout.addWidget(self.trend_note)
+
+        layout.addStretch()
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
+
         return page
+
+    def section_title(self, text, subtitle=""):
+        holder = QWidget()
+        box = QVBoxLayout(holder)
+        box.setContentsMargins(0, 6, 0, 0)
+        box.setSpacing(1)
+
+        title = QLabel(text)
+        title.setObjectName("section_title")
+        box.addWidget(title)
+
+        if subtitle:
+            hint = QLabel(subtitle)
+            hint.setObjectName("section_subtitle")
+            box.addWidget(hint)
+
+        return holder
 
     def make_kpi_card(self, title, value):
         card = QFrame()
@@ -2191,135 +2281,158 @@ class MainWindow(QMainWindow):
         if not self.current_result:
             return
 
-        result = self.current_result
+        results = self.current_result
 
-        entities = result.get(
-            "entities",
-            [],
-        )
+        # ---- Executive overview -----------------------------------
+        summary = dashboard_service.overview(results, self.review_queue)
 
-        execution_count = sum(
-            len(
-                entity.get(
-                    "execution_gap_findings",
-                    [],
-                )
-            )
-            for entity in entities
-        )
+        for card, value in (
+            (self.kpi_socs, summary.entities),
+            (self.kpi_findings, summary.total_findings),
+            (self.kpi_execution, summary.execution_gaps),
+            (self.kpi_negative, summary.negative_space),
+            (self.kpi_critical, summary.critical),
+            (self.kpi_high, summary.high),
+            (self.kpi_anomalies, summary.anomalies),
+            (self.kpi_review, summary.review_queue),
+        ):
+            card.value_label.setText(f"{value:,}")
 
-        negative_count = sum(
-            len(
-                entity.get(
-                    "negative_space_findings",
-                    [],
-                )
-            )
-            for entity in entities
-        )
-
-        total_findings = (
-            execution_count
-            + negative_count
-        )
-
-        review_count = len(
-            result.get(
-                "review_queue",
-                [],
-            )
-        )
-
-        self.kpi_socs.value_label.setText(
-            str(len(entities))
-        )
-
-        self.kpi_findings.value_label.setText(
-            str(total_findings)
-        )
-
-        self.kpi_execution.value_label.setText(
-            str(execution_count)
-        )
-
-        self.kpi_negative.value_label.setText(
-            str(negative_count)
-        )
-
-        self.kpi_review.value_label.setText(
-            str(review_count)
-        )
-
-        # How many findings were ANALYSED versus how many received an AI
-        # explanation. Stating both is the point: an explanation covers a
-        # deliberately small slice of a much larger deterministic result,
-        # and the dashboard should not let that slice look like the whole
-        # assessment.
-        explained = sum(
-            1 for record in self.review_queue
-            if record.get("narration_source") not in (None, "rule")
-        )
+        # Both numbers, always. An explained slice is a deliberately
+        # small fraction of a much larger deterministic result, and the
+        # dashboard must not let it read as the whole assessment.
         self.kpi_explained.value_label.setText(
-            f"{explained} / {total_findings}"
-        )
+            f"{summary.explained} / {summary.total_findings:,}")
 
         self.dashboard_status.setText(
-            "Assessment loaded successfully."
+            f"{summary.entities} entities assessed over "
+            f"{summary.total_alerts:,} alerts. "
+            f"{summary.total_findings:,} findings, "
+            f"{summary.review_queue} prioritised for review."
         )
 
-        # Risk ranking
-        ranked = sorted(
-            entities,
-            key=lambda x: x.get(
-                "priority_rank",
-                999999,
-            ),
-        )
+        # ---- WHO ---------------------------------------------------
+        self.dashboard_rows = dashboard_service.entity_rankings(results)
+        self.risk_table.setRowCount(len(self.dashboard_rows))
 
-        self.risk_table.setRowCount(
-            len(ranked)
-        )
-
-        for row, entity in enumerate(
-            ranked
-        ):
-            values = [
-                entity.get(
-                    "priority_rank",
-                    "N/A",
-                ),
-                entity.get(
-                    "soc_id",
-                    "N/A",
-                ),
-                entity.get(
-                    "organization_name",
-                    "N/A",
-                ),
-                entity.get(
-                    "peer_group",
-                    "N/A",
-                ),
-                entity.get(
-                    "supervisory_risk_score",
-                    "N/A",
-                ),
-                entity.get(
-                    "execution_gap_count",
-                    0,
-                ),
+        for index, row in enumerate(self.dashboard_rows):
+            cells = [
+                str(row.rank),
+                row.soc_id,
+                row.organization,
+                row.peer_group,
+                f"{row.risk_score:.2f}",
+                row.percentile_label,
+                row.deviation_label,
+                f"{row.critical:,}",
+                f"{row.high:,}",
             ]
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if column == 7 and row.critical:
+                    item.setForeground(QColor(severity_color("CRITICAL")))
+                elif column == 8 and row.high:
+                    item.setForeground(QColor(severity_color("HIGH")))
+                elif column == 6 and not row.comparable:
+                    item.setForeground(QColor("#7d8899"))
+                self.risk_table.setItem(index, column, item)
 
-            for column, value in enumerate(
-                values
-            ):
-                self.risk_table.setItem(
-                    row,
-                    column,
-                    QTableWidgetItem(
-                        str(value)
-                    ),
-                )
+            self.risk_table.item(index, 0).setData(Qt.UserRole, row.soc_id)
+
+        self.risk_table.resizeColumnsToContents()
+        self.peer_note.setText(
+            dashboard_service.peer_comparison_note(self.dashboard_rows))
+
+        # ---- WHAT TO REVIEW ----------------------------------------
+        self.refresh_review_preview()
+
+        # ---- Trends -------------------------------------------------
+        self.trend_note.setText(dashboard_service.trend_status(results).message)
+
+        # ---- WHY + WHAT EVIDENCE ------------------------------------
+        # Default to the highest-risk entity: the page should open on
+        # the entity a supervisor is most likely to want.
+        if self.dashboard_rows and not self.risk_table.selectedItems():
+            self.risk_table.selectRow(0)
+        else:
+            self.dashboard_entity_changed()
+
+    def selected_dashboard_entity(self):
+        items = self.risk_table.selectedItems()
+        if not items:
+            return None
+        item = self.risk_table.item(items[0].row(), 0)
+        return item.data(Qt.UserRole) if item else None
+
+    def dashboard_entity_changed(self):
+        """Update the WHY and WHAT EVIDENCE panels for the selected entity."""
+        if not self.current_result:
+            return
+
+        soc_id = self.selected_dashboard_entity()
+        results = self.current_result
+
+        # Six, not eight: the seventh and eighth contributors are
+        # rounding on every entity in the sample, and fewer rows leaves
+        # each category label room to render without truncation.
+        drivers = (dashboard_service.risk_drivers(results, soc_id, limit=6)
+                   if soc_id else [])
+
+        if drivers:
+            self.driver_chart.set_data(
+                [d.finding_type.replace("_", " ").title() for d in drivers],
+                [d.contribution for d in drivers],
+            )
+            top = drivers[0]
+            self.driver_note.setText(
+                f"{soc_id}: {top.finding_type.replace('_', ' ')} contributes "
+                f"{top.share:.0%} of the score — {top.raw_count:,} findings, "
+                f"{top.normalized_per_100:.2f} per 100 alerts, "
+                f"x weight {top.weight:g} = {top.contribution:.2f}. "
+                f"Every contribution is recomputable by hand from the "
+                f"finding counts and the configured weights."
+            )
+        else:
+            self.driver_chart.set_data([], [])
+            self.driver_note.setText("")
+
+        title = self.driver_title.findChild(QLabel)
+        if title is not None:
+            title.setText(f"Risk Drivers & Evidence — {soc_id}"
+                          if soc_id else "Risk Drivers & Evidence")
+
+        severity = dashboard_service.severity_distribution(results, soc_id)
+        self.severity_chart.set_data(severity.labels, severity.values)
+
+        category = dashboard_service.category_distribution(results, soc_id)
+        self.category_chart.set_data(category.labels, category.values)
+
+    def refresh_review_preview(self):
+        preview = dashboard_service.review_preview(self.review_queue, limit=10)
+        self.review_preview_table.setRowCount(len(preview))
+
+        for index, record in enumerate(preview):
+            severity = str(record.get("severity") or "UNRATED")
+            reason = (
+                f"weight {record.get('finding_weight', 0):g} x severity "
+                f"{record.get('severity_boost', 0):g} = "
+                f"{record.get('queue_priority', 0):g}"
+            )
+            cells = [
+                str(record.get("queue_rank", "")),
+                str(record.get("soc_id", "")),
+                severity,
+                str(record.get("finding_type", "")).replace("_", " ").title(),
+                str(record.get("rule_id", "")),
+                reason,
+            ]
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if column == 2:
+                    item.setForeground(QColor(severity_color(severity)))
+                self.review_preview_table.setItem(index, column, item)
+
+        self.review_preview_table.resizeColumnsToContents()
 
     # ============================================================
     # STYLES
@@ -2378,6 +2491,20 @@ class MainWindow(QMainWindow):
             QLabel#ai_status[state="disabled"] {
                 color: #7d8899;
                 border-left: 3px solid #3d4b5f;
+            }
+            QLabel#section_subtitle {
+                color: #7d8899;
+                font-size: 11px;
+            }
+            QLabel#caveat {
+                color: #8c9ab0;
+                font-size: 11px;
+                padding: 4px 2px;
+            }
+            QFrame#panel {
+                background: #182231;
+                border: 1px solid #222d3b;
+                border-radius: 8px;
             }
             QLabel#empty_state {
                 color: #7d8899;

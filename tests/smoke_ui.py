@@ -180,7 +180,44 @@ def main():
     ok(f"{len(window.findings)} findings, "
        f"{len(window.review_queue)} review-queue items")
     assert window.risk_table.rowCount() == 5
-    ok(f"dashboard ranks {window.risk_table.rowCount()} entities")
+    assert window.risk_table.columnCount() == 9
+    ok(f"dashboard ranks {window.risk_table.rowCount()} entities "
+       f"across {window.risk_table.columnCount()} columns")
+
+    # WHO -> WHY: the page opens on the highest-risk entity and its
+    # driver panels follow the selection.
+    assert window.selected_dashboard_entity() == "SOC-003"
+    assert "SOC-003" in window.driver_note.text()
+    ok(f"opens on the highest-risk entity: {window.selected_dashboard_entity()}")
+
+    window.risk_table.selectRow(4)
+    assert window.selected_dashboard_entity() == "SOC-001"
+    assert "SOC-001" in window.driver_note.text()
+    ok("selecting another entity re-drives the risk-driver panel")
+    window.risk_table.selectRow(0)
+
+    assert window.kpi_critical.value_label.text() == "167"
+    assert window.kpi_high.value_label.text() == "435"
+    assert window.kpi_anomalies.value_label.text() == "5"
+    ok("critical / high / anomaly tiles populated")
+
+    assert "not a benchmark" in window.peer_note.text()
+    ok("peer comparison caveat shown for undersized peer groups")
+
+    assert window.review_preview_table.rowCount() == 10
+    assert window.review_preview_table.item(0, 0).text() == "1"
+    ok(f"priority review preview shows "
+       f"{window.review_preview_table.rowCount()} items, ranked")
+
+    assert "no trend data" in window.trend_note.text().lower()
+    ok("single period reports no trend data rather than drawing one")
+
+    for chart in (window.driver_chart, window.severity_chart,
+                   window.category_chart):
+        series = chart.chart().series()
+        assert series, "chart has no series"
+        assert series[0].count() == 1, "one bar set per chart keeps bars full-width"
+    ok("all three charts rendered with data")
     assert window.finding_table.rowCount() > 0
     ok(f"findings explorer shows {window.finding_table.rowCount()} rows")
     assert window.review_table.rowCount() > 0
