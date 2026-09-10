@@ -39,6 +39,31 @@ CATEGORIES = [
 
 SOURCES = ["SIEM", "EDR", "IDS", "FIREWALL", "CLOUD_TRAIL", "DLP"]
 SECTORS = ["FINANCE", "ENERGY", "HEALTHCARE", "GOVERNMENT", "TELECOM", "MANUFACTURING"]
+
+#: Smallest peer group worth comparing against. Matches the threshold
+#: the benchmarking layer applies before it will report a percentile.
+MIN_PEER_GROUP = 3
+
+
+def assign_sectors(n_socs: int, min_group: int = MIN_PEER_GROUP) -> list:
+    """
+    Distribute entities across sectors so every peer group is large
+    enough to benchmark against.
+
+    Sectors used to be picked independently at random per entity, which
+    produced groups of one and two at every scale — even 20 entities
+    left three sectors with a single member. Peer benchmarking cannot
+    say anything about a group of one, so the feature was undemonstrable
+    on its own demo data.
+
+    Uses as many sectors as the entity count supports at `min_group`
+    each, then round-robins so the groups come out as even as possible.
+    A single sector holding every entity is the correct answer for a
+    small run: five banks is a peer group, five entities across five
+    sectors is not.
+    """
+    usable = max(1, min(len(SECTORS), n_socs // min_group))
+    return [SECTORS[i % usable] for i in range(n_socs)]
 ANALYST_ROLES = ["TIER1", "TIER2", "TIER3", "SUPERVISOR"]
 
 MITRE = [
@@ -190,6 +215,8 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
     alerts, alert_events, cases, escalations = [], [], [], []
     actions, evidence, incidents, telemetry, policies = [], [], [], [], []
 
+    sectors_assigned = assign_sectors(n_socs)
+
     profiles_assigned = []
     for i in range(n_socs):
         profile = PROFILE_ORDER[i] if i < len(PROFILE_ORDER) else random.choice(PROFILE_ORDER[:3])
@@ -206,7 +233,7 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
             RISK_PROFILES[TRAJECTORIES[profile]],
             progress,
         )
-        sector = random.choice(SECTORS)
+        sector = sectors_assigned[i]
         n_analysts = random.randint(6, 14)
 
         socs.append({

@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 from analytics.narration.base import STATE_DISABLED, BackendStatus
 from analytics.ingestion import describe_supported_inputs
 from application.services import (
+    benchmark_service,
     dashboard_service,
     review_service,
     rule_reference,
@@ -195,6 +196,7 @@ class MainWindow(QMainWindow):
         self.findings_button = self.make_nav_button("Findings")
         self.review_button = self.make_nav_button("Review Queue")
         self.reports_button = self.make_nav_button("Reports")
+        self.benchmark_button = self.make_nav_button("Benchmarking")
         self.settings_button = self.make_nav_button("Settings")
 
         sidebar_layout.addWidget(self.dashboard_button)
@@ -202,6 +204,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(self.findings_button)
         sidebar_layout.addWidget(self.review_button)
         sidebar_layout.addWidget(self.reports_button)
+        sidebar_layout.addWidget(self.benchmark_button)
         sidebar_layout.addWidget(self.settings_button)
 
         sidebar_layout.addStretch()
@@ -229,6 +232,7 @@ class MainWindow(QMainWindow):
         self.findings_page = self.build_findings_page()
         self.review_page = self.build_review_page()
         self.reports_page = self.build_reports_page()
+        self.benchmark_page = self.build_benchmark_page()
         self.settings_page = SettingsPage(self.ai_config)
         self.settings_page.settings_saved.connect(self.ai_settings_saved)
 
@@ -237,6 +241,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.findings_page)
         self.pages.addWidget(self.review_page)
         self.pages.addWidget(self.reports_page)
+        self.pages.addWidget(self.benchmark_page)
         self.pages.addWidget(self.settings_page)
 
         root_layout.addWidget(sidebar)
@@ -258,8 +263,11 @@ class MainWindow(QMainWindow):
         self.reports_button.clicked.connect(
             lambda: self.show_page(4)
         )
-        self.settings_button.clicked.connect(
+        self.benchmark_button.clicked.connect(
             lambda: self.show_page(5)
+        )
+        self.settings_button.clicked.connect(
+            lambda: self.show_page(6)
         )
 
         self.show_page(0)
@@ -327,7 +335,8 @@ class MainWindow(QMainWindow):
             ("&Findings", "Ctrl+3"),
             ("Review &Queue", "Ctrl+4"),
             ("&Reports", "Ctrl+5"),
-            ("&Settings", "Ctrl+6"),
+            ("&Benchmarking", "Ctrl+6"),
+            ("&Settings", "Ctrl+7"),
         ]):
             action = QAction(label, self)
             action.setShortcut(shortcut)
@@ -435,10 +444,10 @@ class MainWindow(QMainWindow):
         has_results = self.session.has_results
 
         for button in (self.findings_button, self.review_button,
-                        self.reports_button):
+                        self.reports_button, self.benchmark_button):
             button.setEnabled(has_results)
 
-        for index in (2, 3, 4):
+        for index in (2, 3, 4, 5):
             self.view_actions[index].setEnabled(has_results)
 
         self.run_button.setEnabled(
@@ -447,7 +456,8 @@ class MainWindow(QMainWindow):
 
         for placeholder in (self.findings_placeholder,
                              self.review_placeholder,
-                             self.reports_placeholder):
+                             self.reports_placeholder,
+                             self.benchmark_placeholder):
             placeholder.setText(self.empty_state_text())
 
         self.update_page_visibility()
@@ -455,7 +465,7 @@ class MainWindow(QMainWindow):
 
         # A results page the supervisor is standing on when results go
         # away would otherwise show a stale table.
-        if not has_results and self.pages.currentIndex() in (2, 3, 4):
+        if not has_results and self.pages.currentIndex() in (2, 3, 4, 5):
             self.show_page(0)
 
     def empty_state_text(self) -> str:
@@ -474,6 +484,7 @@ class MainWindow(QMainWindow):
             (self.findings_placeholder, self.findings_content),
             (self.review_placeholder, self.review_content),
             (self.reports_placeholder, self.reports_content),
+            (self.benchmark_placeholder, self.benchmark_content),
         ):
             placeholder.setVisible(not has_results)
             content.setVisible(has_results)
@@ -501,7 +512,7 @@ class MainWindow(QMainWindow):
         index = stored.get("page_index", 0)
         # Never restore onto a results page: at launch there are no
         # results, and the page would open on its empty state.
-        if isinstance(index, int) and index in (0, 1, 5):
+        if isinstance(index, int) and index in (0, 1, 6):
             self.show_page(index)
 
     def save_window_state(self):
@@ -534,6 +545,7 @@ class MainWindow(QMainWindow):
             self.findings_button,
             self.review_button,
             self.reports_button,
+            self.benchmark_button,
             self.settings_button,
         ]
 
@@ -746,6 +758,7 @@ class MainWindow(QMainWindow):
 
     def section_title(self, text, subtitle=""):
         holder = QWidget()
+        holder.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         box = QVBoxLayout(holder)
         box.setContentsMargins(0, 6, 0, 0)
         box.setSpacing(1)
@@ -862,7 +875,7 @@ class MainWindow(QMainWindow):
 
         self.ai_settings_button = QPushButton("AI Settings…")
         self.ai_settings_button.setCursor(Qt.PointingHandCursor)
-        self.ai_settings_button.clicked.connect(lambda: self.show_page(5))
+        self.ai_settings_button.clicked.connect(lambda: self.show_page(6))
         ai_row.addWidget(self.ai_settings_button)
 
         layout.addLayout(ai_row)
@@ -1169,6 +1182,7 @@ class MainWindow(QMainWindow):
         self.refresh_dashboard()
         self.refresh_findings()
         self.refresh_review_queue()
+        self.refresh_benchmarking()
         self.refresh_reports()
 
         self.notify(
@@ -1595,7 +1609,7 @@ class MainWindow(QMainWindow):
             self.load_finding_source_records)
         splitter.addWidget(self.finding_detail_panel)
         splitter.setSizes([700, 640])
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)
 
         return page
 
@@ -2008,7 +2022,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.review_detail_panel)
 
         splitter.setSizes([760, 620])
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)
 
         return page
 
@@ -2146,6 +2160,233 @@ class MainWindow(QMainWindow):
 
     def load_review_source_records(self):
         self.load_source_into(self.review_detail_panel)
+
+    # ============================================================
+    # PEER BENCHMARKING
+    # ============================================================
+
+    def build_benchmark_page(self):
+        """
+        Peer benchmarking.
+
+        The page answers two questions in order: where does this entity
+        sit among entities like it, and — the part a supervisor can act
+        on — on WHAT does it differ. A percentile alone is not a finding;
+        "3.4x the peer median on slow triage, 161 findings against a peer
+        median of 11.75 per 100 alerts" is somewhere to start.
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(30, 25, 30, 25)
+
+        title = QLabel("Peer Benchmarking")
+        title.setObjectName("page_title")
+        layout.addWidget(title)
+
+        description = QLabel(
+            "How each entity compares with entities in the same sector. "
+            "Rates are normalised per 100 alerts so a larger entity is "
+            "not flagged merely for handling more alerts."
+        )
+        description.setObjectName("page_description")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        page_layout = layout
+
+        self.benchmark_placeholder = QLabel("")
+        self.benchmark_placeholder.setObjectName("empty_state")
+        self.benchmark_placeholder.setAlignment(Qt.AlignCenter)
+        self.benchmark_placeholder.setWordWrap(True)
+        page_layout.addWidget(self.benchmark_placeholder, 1)
+
+        self.benchmark_content = QWidget()
+        layout = QVBoxLayout(self.benchmark_content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(self.benchmark_content, 1)
+
+        self.benchmark_caveat = QLabel("")
+        self.benchmark_caveat.setObjectName("caveat")
+        self.benchmark_caveat.setWordWrap(True)
+        layout.addWidget(self.benchmark_caveat)
+
+        layout.addWidget(self.section_title(
+            "Peer Groups", "Entities are compared only within their sector"))
+
+        self.group_table = QTableWidget()
+        self.group_table.setColumnCount(6)
+        self.group_table.setHorizontalHeaderLabels(
+            ["Peer Group", "Entities", "Median Score", "Lowest", "Highest",
+             "Comparable"])
+        self.group_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.group_table.verticalHeader().setVisible(False)
+        self.group_table.horizontalHeader().setStretchLastSection(True)
+        self.group_table.setMaximumHeight(190)
+        layout.addWidget(self.group_table)
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        position_host = QWidget()
+        position_layout = QVBoxLayout(position_host)
+        position_layout.setContentsMargins(0, 6, 0, 0)
+        position_layout.addWidget(self.section_title(
+            "Entity Position", "Select an entity to see what separates it"))
+
+        self.position_table = QTableWidget()
+        self.position_table.setColumnCount(7)
+        self.position_table.setHorizontalHeaderLabels(
+            ["Entity", "Peer Group", "Risk Score", "Peer Median",
+             "Percentile", "Deviation", "In Group"])
+        self.position_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.position_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.position_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.position_table.verticalHeader().setVisible(False)
+        self.position_table.horizontalHeader().setStretchLastSection(True)
+        self.position_table.itemSelectionChanged.connect(
+            self.benchmark_entity_selected)
+        position_layout.addWidget(self.position_table)
+        splitter.addWidget(position_host)
+
+        compare_host = QWidget()
+        compare_layout = QVBoxLayout(compare_host)
+        compare_layout.setContentsMargins(10, 6, 0, 0)
+
+        self.comparison_title = QLabel("Select an entity")
+        self.comparison_title.setObjectName("detail_title")
+        self.comparison_title.setWordWrap(True)
+        compare_layout.addWidget(self.comparison_title)
+
+        self.comparison_position = QLabel("")
+        self.comparison_position.setObjectName("caveat")
+        self.comparison_position.setWordWrap(True)
+        compare_layout.addWidget(self.comparison_position)
+
+        self.comparison_table = QTableWidget()
+        self.comparison_table.setColumnCount(5)
+        self.comparison_table.setHorizontalHeaderLabels(
+            ["Finding Type", "Count", "Per 100 alerts", "Peer Median",
+             "Compared with peers"])
+        self.comparison_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.comparison_table.verticalHeader().setVisible(False)
+        self.comparison_table.horizontalHeader().setStretchLastSection(True)
+        compare_layout.addWidget(self.comparison_table)
+
+        self.comparison_note = QLabel(
+            "Deviation is an indicator for review, not a finding. Entities "
+            "differ in technology footprint, threat profile and reporting "
+            "practice for reasons unrelated to how well they are run — the "
+            "underlying findings and their evidence remain the basis for "
+            "any supervisory conclusion."
+        )
+        self.comparison_note.setObjectName("caveat")
+        self.comparison_note.setWordWrap(True)
+        compare_layout.addWidget(self.comparison_note)
+
+        splitter.addWidget(compare_host)
+        splitter.setSizes([700, 660])
+        # Stretch 1 so the splitter absorbs every spare pixel. Without
+        # it a QVBoxLayout spreads leftover space across the wrapped
+        # labels above, whose maximum height is unbounded, and the page
+        # renders with large empty bands between its sections.
+        layout.addWidget(splitter, 1)
+
+        return page
+
+    def refresh_benchmarking(self):
+        if not hasattr(self, "position_table") or not self.current_result:
+            return
+
+        groups = benchmark_service.build_peer_groups(self.current_result)
+        self.benchmark_positions = benchmark_service.build_positions(
+            self.current_result)
+
+        self.benchmark_caveat.setText(
+            benchmark_service.benchmarking_caveat(groups))
+
+        ordered = sorted(groups.values(), key=lambda g: g.name)
+        self.group_table.setRowCount(len(ordered))
+        for row, group in enumerate(ordered):
+            cells = [
+                group.name,
+                str(group.size),
+                f"{group.median:,.1f}" if group.comparable else "—",
+                f"{min(group.scores):,.1f}" if group.scores else "—",
+                f"{max(group.scores):,.1f}" if group.scores else "—",
+                "yes" if group.comparable else
+                f"no (needs {benchmark_service.MIN_PEERS})",
+            ]
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if column == 5 and not group.comparable:
+                    item.setForeground(QColor("#e8c07d"))
+                self.group_table.setItem(row, column, item)
+        self.group_table.resizeColumnsToContents()
+
+        self.position_table.setRowCount(len(self.benchmark_positions))
+        for row, position in enumerate(self.benchmark_positions):
+            comparable = position.comparable
+            cells = [
+                position.soc_id,
+                position.peer_group,
+                f"{position.risk_score:,.1f}",
+                f"{position.peer_median:,.1f}" if comparable else "—",
+                f"{position.percentile:,.0f}th" if comparable
+                else f"n={position.peer_count}",
+                f"{position.deviation:+,.1f}" if comparable else "—",
+                f"{position.rank_in_group} of {position.peer_count}",
+            ]
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if column == 5 and comparable and position.deviation > 0:
+                    item.setForeground(QColor("#ec835a"))
+                elif column == 5 and comparable:
+                    item.setForeground(QColor("#0ca30c"))
+                elif not comparable and column in (3, 4, 5):
+                    item.setForeground(QColor("#7d8899"))
+                self.position_table.setItem(row, column, item)
+            self.position_table.item(row, 0).setData(Qt.UserRole, row)
+
+        self.position_table.resizeColumnsToContents()
+
+        if self.benchmark_positions and not self.position_table.selectedItems():
+            self.position_table.selectRow(0)
+
+    def benchmark_entity_selected(self):
+        items = self.position_table.selectedItems()
+        if not items:
+            return
+        item = self.position_table.item(items[0].row(), 0)
+        index = item.data(Qt.UserRole) if item else None
+        if index is None or index >= len(self.benchmark_positions):
+            return
+
+        position = self.benchmark_positions[index]
+        self.comparison_title.setText(
+            f"{position.soc_id} — {position.organization}")
+        self.comparison_position.setText(position.position_label)
+
+        if not position.comparable:
+            self.comparison_table.setRowCount(0)
+            return
+
+        notable = position.notable(limit=10)
+        self.comparison_table.setRowCount(len(notable))
+        for row, comparison in enumerate(notable):
+            cells = [
+                comparison.finding_type.replace("_", " ").title(),
+                f"{comparison.raw_count:,}",
+                f"{comparison.entity_rate:,.2f}",
+                f"{comparison.peer_median_rate:,.2f}",
+                comparison.label(),
+            ]
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if column == 4:
+                    item.setForeground(QColor(
+                        "#ec835a" if comparison.direction == "above"
+                        else "#0ca30c"))
+                self.comparison_table.setItem(row, column, item)
+        self.comparison_table.resizeColumnsToContents()
 
     # ============================================================
     # REPORTS

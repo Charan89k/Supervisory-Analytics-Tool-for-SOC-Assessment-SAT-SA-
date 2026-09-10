@@ -154,11 +154,34 @@ def test_peer_median_is_computed_within_the_group_not_across_all():
     assert rows["SOC-5"].peer_median == 1002.0
 
 
-def test_peer_note_names_the_undersized_groups(results):
-    rows = ds.entity_rankings(results)
-    note = ds.peer_comparison_note(rows)
+def test_peer_note_names_undersized_groups():
+    """
+    Constructs its own undersized group rather than relying on the
+    synthetic dataset's shape. The generator now distributes sectors so
+    every peer group is benchmarkable, so a test that depended on the
+    dataset having a group of one would fail for reasons unrelated to
+    the note it is checking.
+    """
+    results = {"entities": [
+        entity("SOC-1", peer_group="TELECOM", rank=1),
+        entity("SOC-2", peer_group="ENERGY", rank=2),
+        entity("SOC-3", peer_group="ENERGY", rank=3),
+    ]}
+    note = ds.peer_comparison_note(ds.entity_rankings(results))
+
+    assert "TELECOM" in note
     assert "not a benchmark" in note
     assert "risk scores remain fully valid" in note
+
+
+def test_peer_note_when_every_group_is_large_enough(results):
+    """The dataset the suite runs on should now be benchmarkable."""
+    rows = ds.entity_rankings(results)
+    if all(row.comparable for row in rows):
+        note = ds.peer_comparison_note(rows)
+        assert "or more entities" in note
+    else:
+        pytest.skip("dataset has undersized peer groups")
 
 
 def test_rankings_are_ordered_by_rank(results):

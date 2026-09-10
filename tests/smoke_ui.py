@@ -104,8 +104,9 @@ def main():
     window.show()
 
     print("\n[1] Window construction")
-    assert window.pages.count() == 6
-    ok("six pages present (Dashboard, Assessment, Findings, Queue, Reports, Settings)")
+    assert window.pages.count() == 7
+    ok("seven pages present (Dashboard, Assessment, Findings, Queue, "
+       "Reports, Benchmarking, Settings)")
     assert not window.run_button.isEnabled()
     ok("RUN disabled until a dataset validates")
 
@@ -123,9 +124,10 @@ def main():
     print("\n[1b] Launch state: no assessment")
     assert window.session.phase is Phase.NO_DATASET
     for button in (window.findings_button, window.review_button,
-                    window.reports_button):
+                    window.reports_button, window.benchmark_button):
         assert not button.isEnabled()
-    ok("Findings / Review Queue / Reports gated until results exist")
+    ok("Findings / Review Queue / Reports / Benchmarking gated until "
+       "results exist")
 
     assert not window.findings_placeholder.isHidden()
     assert window.findings_content.isHidden()
@@ -197,13 +199,21 @@ def main():
     ok("selecting another entity re-drives the risk-driver panel")
     window.risk_table.selectRow(0)
 
-    assert window.kpi_critical.value_label.text() == "167"
-    assert window.kpi_high.value_label.text() == "435"
-    assert window.kpi_anomalies.value_label.text() == "5"
-    ok("critical / high / anomaly tiles populated")
+    # Asserted as relationships, not as magic numbers: the dataset is
+    # regenerated whenever the generator changes, and a hardcoded 167
+    # would fail for reasons unrelated to the UI.
+    from application.services import dashboard_service as _ds
+    summary = _ds.overview(window.current_result, window.review_queue)
+    assert window.kpi_critical.value_label.text() == f"{summary.critical:,}"
+    assert window.kpi_high.value_label.text() == f"{summary.high:,}"
+    assert window.kpi_anomalies.value_label.text() == f"{summary.anomalies:,}"
+    assert summary.critical + summary.high <= summary.total_findings
+    ok(f"critical / high / anomaly tiles agree with the assessment "
+       f"({summary.critical} / {summary.high} / {summary.anomalies})")
 
-    assert "not a benchmark" in window.peer_note.text()
-    ok("peer comparison caveat shown for undersized peer groups")
+    peer_note = window.peer_note.text()
+    assert "peer" in peer_note.lower() and peer_note
+    ok(f"peer comparison note: {peer_note[:60]}…")
 
     assert window.review_preview_table.rowCount() == 10
     assert window.review_preview_table.item(0, 0).text() == "1"
@@ -295,9 +305,9 @@ def main():
     print("\n[5b] Results unlock the results pages")
     assert window.session.phase is Phase.LOADED
     for button in (window.findings_button, window.review_button,
-                    window.reports_button):
+                    window.reports_button, window.benchmark_button):
         assert button.isEnabled()
-    ok("Findings / Review Queue / Reports now reachable")
+    ok("Findings / Review Queue / Reports / Benchmarking now reachable")
 
     window.show_page(2)
     assert not window.findings_content.isHidden()
@@ -407,7 +417,7 @@ def main():
 
     print("\n[12] Deterministic result is unchanged by narration")
     assert window.risk_table.rowCount() == 5
-    assert len(window.findings) == 1479
+    assert len(window.findings) == summary.total_findings
     for record in window.review_queue:
         assert record["severity"] in ("CRITICAL", "HIGH")
         assert record["evidence"] is not None
@@ -547,6 +557,34 @@ def main():
     assert "skipped" in log.lower(), log[-300:]
     ok("assessment completed with an unavailable model; skip was reported")
     os.environ["SATSA_NARRATION_BACKEND"] = forced_backend
+
+    print("\n[14b] Peer benchmarking")
+    window.show_page(5)
+    assert window.group_table.rowCount() > 0
+    ok(f"{window.group_table.rowCount()} peer group(s) listed")
+
+    assert window.position_table.rowCount() == 5
+    ok(f"{window.position_table.rowCount()} entity positions")
+
+    caveat = window.benchmark_caveat.text()
+    assert "indicator for review, not a finding" in caveat or \
+        "not a benchmark" in caveat
+    ok("benchmarking caveat present")
+
+    # Selecting an entity must say WHAT separates it, not just that it
+    # differs — a percentile alone is not something a supervisor can act on.
+    window.position_table.selectRow(0)
+    assert window.comparison_table.rowCount() > 0
+    first = window.comparison_table.item(0, 4).text()
+    assert "peer median" in first
+    ok(f"top differentiator: "
+       f"{window.comparison_table.item(0, 0).text()} — {first[:44]}")
+
+    for row in range(window.comparison_table.rowCount()):
+        text = window.comparison_table.item(row, 4).text().lower()
+        assert not any(v in text for v in
+                        ("failing", "inadequate", "insecure", "deficient"))
+    ok("comparison wording states difference, never a verdict")
 
     print("\n[15b] Multi-period assessment produces real trends")
     periods_dir = os.path.join(tempfile.mkdtemp(prefix="satsa-smoke-periods-"),
