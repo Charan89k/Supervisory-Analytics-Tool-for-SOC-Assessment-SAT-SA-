@@ -1,0 +1,70 @@
+# SAT-SA assessment rules — supervisors tune these without touching code.
+# All thresholds are explicit and auditable: every finding traces back
+# to a specific rule and value here.
+
+escalation:
+  required_severities: ["HIGH", "CRITICAL"]
+
+sla_minutes:
+  ack:
+    LOW: 60
+    MEDIUM: 30
+    HIGH: 15
+    CRITICAL: 10
+  triage:
+    LOW: 480
+    MEDIUM: 240
+    HIGH: 90
+    CRITICAL: 45
+
+execution_gaps:
+  # Ack delay this many multiples of SLA counts as SLOW_TRIAGE
+  slow_triage_sla_multiplier: 2.5
+  # Investigation duration below this fraction of the SLA triage target
+  # (for HIGH/CRITICAL only) counts as FAST_CLOSURE
+  fast_closure_sla_fraction: 0.15
+  # Minimum investigation duration (minutes) below which a HIGH/CRITICAL
+  # closure is always considered suspicious, regardless of SLA fraction
+  fast_closure_floor_minutes: 10
+  # A finding only fires if actual duration is at least this many
+  # minutes BELOW the computed threshold — prevents borderline cases
+  # (e.g. 13.0 vs a 13.5-minute threshold) from being flagged as if
+  # they were the same as a genuinely suspicious 3-minute closure.
+  fast_closure_min_margin_minutes: 5
+  # Resolution-reason text similarity threshold (0-1) for flagging
+  # repetitive / template-driven investigations on the same asset
+  repetitive_investigation_similarity: 0.9
+  repetitive_investigation_min_occurrences: 3
+
+negative_space:
+  # Telemetry coverage below this percentage is a coverage gap
+  min_expected_coverage_pct: 70
+  # Entity-level alert volume more than this many std-devs below the
+  # peer mean (for its sector) is flagged as unexpectedly low activity
+  low_activity_zscore_threshold: -1.5
+  # Category present for >= this fraction of peers but absent for an
+  # entity is flagged as a missing alert category
+  missing_category_peer_presence_fraction: 0.6
+
+benchmarking:
+  # Peer group key: "sector" groups entities by soc sector; "all" uses
+  # the whole dataset as one peer group (use "all" for small pilot runs)
+  peer_group_by: "all"
+
+scoring:
+  # Weights for the composite entity risk score. Kept simple and
+  # linear on purpose — a supervisor must be able to recompute this
+  # score by hand from the underlying indicator counts.
+  weights:
+    missed_escalation: 3.0
+    fast_closure: 2.0
+    slow_triage: 1.0
+    missing_evidence: 1.5
+    repetitive_investigation: 2.0
+    reopened_case: 1.0
+    telemetry_gap: 3.0
+    low_activity_outlier: 2.0
+    missing_category: 1.5
+  # Normalize indicator counts per 100 alerts/cases before weighting,
+  # so larger entities aren't penalized purely for higher volume.
+  normalize_per: 100

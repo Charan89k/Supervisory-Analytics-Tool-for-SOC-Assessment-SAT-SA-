@@ -1,0 +1,5 @@
+soc_id,source_name,finding_type,rule_id,rationale
+SOC-002,Firewall / Perimeter Logs,TELEMETRY_GAP,TELEMETRY-COVERAGE-001,"Expected telemetry source 'Firewall / Perimeter Logs' has 0.0% coverage, below the required 70% threshold (status: MISSING)."
+SOC-003,DNS Logs,TELEMETRY_GAP,TELEMETRY-COVERAGE-001,"Expected telemetry source 'DNS Logs' has 0.0% coverage, below the required 70% threshold (status: MISSING)."
+SOC-004,CloudTrail,TELEMETRY_GAP,TELEMETRY-COVERAGE-001,"Expected telemetry source 'CloudTrail' has 0.0% coverage, below the required 70% threshold (status: MISSING)."
+SOC-004,Domain Controller Logs,TELEMETRY_GAP,TELEMETRY-COVERAGE-001,"Expected telemetry source 'Domain Controller Logs' has 0.0% coverage, below the required 70% threshold (status: MISSING)."
