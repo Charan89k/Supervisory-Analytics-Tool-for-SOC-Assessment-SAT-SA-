@@ -12,7 +12,7 @@ the layout leaves room for them rather than pretending they exist.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -60,7 +60,13 @@ class SettingsPage(QWidget):
         self.config = config
         self._build()
         self.load_from(config)
-        self.refresh_status()
+
+        # Deferred past construction for the same reason the main window
+        # defers its probe: a configured backend on an unreachable host
+        # blocks for the full probe timeout, and the page is built during
+        # application startup. Nothing here needs the answer synchronously.
+        self.status_label.setText("Checking…")
+        QTimer.singleShot(0, self.refresh_status)
 
     # ------------------------------------------------------------------
     # Layout

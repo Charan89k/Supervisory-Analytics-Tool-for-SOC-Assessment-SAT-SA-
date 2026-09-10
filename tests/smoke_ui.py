@@ -108,6 +108,34 @@ def main():
     assert not window.run_button.isEnabled()
     ok("RUN disabled until a dataset validates")
 
+    from application.session import Phase
+    from application.version import APP_NAME, APP_VERSION
+
+    assert APP_VERSION in window.windowTitle()
+    assert not window.windowIcon().isNull()
+    ok(f"identity: {APP_NAME} v{APP_VERSION}, window icon set")
+
+    menus = [a.text() for a in window.menuBar().actions()]
+    assert menus == ["&Assessment", "&View", "&Help"], menus
+    ok(f"menu bar: {', '.join(m.replace('&', '') for m in menus)}")
+
+    print("\n[1b] Launch state: no assessment")
+    assert window.session.phase is Phase.NO_DATASET
+    for button in (window.findings_button, window.review_button,
+                    window.reports_button):
+        assert not button.isEnabled()
+    ok("Findings / Review Queue / Reports gated until results exist")
+
+    assert not window.findings_placeholder.isHidden()
+    assert window.findings_content.isHidden()
+    assert "No assessment loaded" in window.findings_placeholder.text()
+    assert "Select a dataset" in window.findings_placeholder.text()
+    ok("empty state explains what to do rather than showing a blank grid")
+
+    assert "No dataset" in window.status_dataset.text()
+    ok(f"status bar: {window.status_phase.text().strip()!r} "
+       f"{window.status_dataset.text()!r}")
+
     print("\n[2] Unsupported input is refused with a reason")
     window.drop_zone.set_dataset(os.path.join(DATA, "alerts.csv"))
     assert window.dataset_path is None, "a bare CSV must not be accepted"
@@ -117,12 +145,15 @@ def main():
     ok("single CSV refused, RUN stays disabled, reason shown")
 
     print("\n[3] Valid dataset validates")
+    # phase should move NO_DATASET -> VALIDATING -> READY
     window.drop_zone.set_dataset(DATA)
     assert pump(lambda: not window.validation_busy), "validation hung"
     assert not window.current_validation_report.has_errors
     assert "PASSED" in window.validation_status.text()
     assert window.run_button.isEnabled()
+    assert window.session.phase is Phase.READY
     ok(f"validation panel reads {window.validation_status.text()!r}")
+    ok(f"phase -> {window.session.phase.value}")
 
     print("\n[4] Invalid dataset blocks the run and shows the report")
     corrupt = corrupt_copy_of(DATA)
@@ -133,7 +164,9 @@ def main():
         assert "FAILED" in window.validation_status.text()
         assert "duplicate alert_id" in window.validation_detail.toPlainText()
         assert not window.run_button.isEnabled()
+        assert window.session.phase is Phase.INVALID
         ok("blocking error surfaced in the panel; RUN disabled")
+        ok(f"phase -> {window.session.phase.value}")
     finally:
         shutil.rmtree(corrupt, ignore_errors=True)
 
@@ -154,6 +187,22 @@ def main():
     ok(f"review queue shows {window.review_table.rowCount()} rows")
     assert "report" in window.report_status.text()
     ok(f"reports page reads {window.report_status.text()!r}")
+
+    print("\n[5b] Results unlock the results pages")
+    assert window.session.phase is Phase.LOADED
+    for button in (window.findings_button, window.review_button,
+                    window.reports_button):
+        assert button.isEnabled()
+    ok("Findings / Review Queue / Reports now reachable")
+
+    window.show_page(2)
+    assert not window.findings_content.isHidden()
+    assert window.findings_placeholder.isHidden()
+    ok("placeholder replaced by content")
+
+    assert window.session.last_assessment_at
+    assert "Last assessment" in window.status_dataset.text()
+    ok(f"status bar: {window.status_dataset.text()!r}")
 
     print("\n[6] Regression: a second assessment can start")
     assert not window.assessment_busy, "busy flag was never cleared"
@@ -304,7 +353,29 @@ def main():
     ok("assessment completed with an unavailable model; skip was reported")
     os.environ["SATSA_NARRATION_BACKEND"] = forced_backend
 
-    print("\n[16] No language model was involved")
+    print("\n[16] Window state persists")
+    window.show_page(1)
+    window.save_window_state()
+    stored = window.settings_service.load_window_state()
+    assert stored["page_index"] == 1
+    assert stored["geometry"]
+    ok(f"geometry and last page ({stored['page_index']}) saved")
+
+    print("\n[17] About and System Information")
+    before = len(window.notifications)
+    window.show_about()
+    window.show_system_information()
+    assert len(window.notifications) == before + 2
+    about = window.notifications[-2][2]
+    system = window.notifications[-1][2]
+    assert APP_VERSION in about
+    assert "does not replace" in about.lower()
+    assert "no external" in system.lower()
+    assert str(window.settings_service.path) in system
+    ok("About states the tool supports rather than replaces judgement")
+    ok("System Information reports offline status and the settings path")
+
+    print("\n[18] No language model was involved")
     from analytics.narration import resolve_backend_name
     assert resolve_backend_name({}) == "mock"
     ok("narration backend resolved to 'mock' throughout")

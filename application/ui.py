@@ -1,8 +1,8 @@
 from pathlib import Path
 import json
 
-from PySide6.QtCore import Qt, QThread, QUrl
-from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtCore import QByteArray, Qt, QThread, QTimer, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -29,6 +29,15 @@ from PySide6.QtWidgets import (
 )
 
 from analytics.narration.base import STATE_DISABLED, BackendStatus
+from analytics.ingestion import describe_supported_inputs
+from application.session import Phase, SessionState
+from application.version import (
+    APP_FULL_NAME,
+    APP_NAME,
+    APP_TAGLINE,
+    APP_VERSION,
+)
+from application.widgets.app_icon import application_icon
 from application.narration_worker import NarrationWorker
 from application.pages.settings_page import SettingsPage
 from application.services.narration_service import NarrationService
@@ -56,8 +65,15 @@ class MainWindow(QMainWindow):
         self.interactive = interactive
         self.notifications = []
 
-        self.setWindowTitle("SAT-SA — Supervisory Analytics Tool")
+        self.setWindowTitle(f"{APP_FULL_NAME}  —  v{APP_VERSION}")
+        self.setWindowIcon(application_icon())
         self.resize(1450, 900)
+
+        # One object answers "where is this session?". Every page gate
+        # and status readout reads from it rather than inferring an
+        # answer from whichever attributes happen to be set.
+        self.session = SessionState()
+        self.session.changed.connect(self.on_phase_changed)
 
         self.selected_dataset = None
         self.dataset_path = None
@@ -95,7 +111,19 @@ class MainWindow(QMainWindow):
         self.output_dir = self.project_root / "outputs" / "desktop_assessment"
 
         self.build_ui()
+        self.build_menu_bar()
+        self.build_status_bar()
         self.apply_styles()
+        self.restore_window_state()
+
+        # Reflect the launch phase once everything exists.
+        self.on_phase_changed(self.session.phase)
+
+        # The first AI probe is deferred past the initial paint. On the
+        # Ollama backend it is an HTTP call with a multi-second timeout,
+        # and doing it inline meant the window did not appear until it
+        # returned. Nothing depends on the result being ready sooner.
+        QTimer.singleShot(0, self.refresh_ai_status)
 
     # ============================================================
     # UI
@@ -228,6 +256,237 @@ class MainWindow(QMainWindow):
             "warning": QMessageBox.warning,
             "critical": QMessageBox.critical,
         }.get(level, QMessageBox.information)(self, title, message)
+
+    # ============================================================
+    # MENU BAR / STATUS BAR
+    # ============================================================
+
+    def build_menu_bar(self):
+        menus = self.menuBar()
+
+        assessment_menu = menus.addMenu("&Assessment")
+
+        self.action_new = QAction("&New Assessment", self)
+        self.action_new.setShortcut(QKeySequence.New)
+        self.action_new.triggered.connect(lambda: self.show_page(1))
+        assessment_menu.addAction(self.action_new)
+
+        self.action_run = QAction("&Run Assessment", self)
+        self.action_run.setShortcut("Ctrl+R")
+        self.action_run.triggered.connect(self.start_assessment)
+        assessment_menu.addAction(self.action_run)
+
+        assessment_menu.addSeparator()
+
+        self.action_open_outputs = QAction("Open &Output Folder", self)
+        self.action_open_outputs.triggered.connect(self.open_output_folder)
+        assessment_menu.addAction(self.action_open_outputs)
+
+        assessment_menu.addSeparator()
+
+        action_quit = QAction("E&xit", self)
+        action_quit.setShortcut(QKeySequence.Quit)
+        action_quit.triggered.connect(self.close)
+        assessment_menu.addAction(action_quit)
+
+        view_menu = menus.addMenu("&View")
+        self.view_actions = []
+        for index, (label, shortcut) in enumerate([
+            ("&Dashboard", "Ctrl+1"),
+            ("New &Assessment", "Ctrl+2"),
+            ("&Findings", "Ctrl+3"),
+            ("Review &Queue", "Ctrl+4"),
+            ("&Reports", "Ctrl+5"),
+            ("&Settings", "Ctrl+6"),
+        ]):
+            action = QAction(label, self)
+            action.setShortcut(shortcut)
+            action.triggered.connect(
+                lambda checked=False, i=index: self.show_page(i))
+            view_menu.addAction(action)
+            self.view_actions.append(action)
+
+        help_menu = menus.addMenu("&Help")
+
+        action_about = QAction(f"&About {APP_NAME}", self)
+        action_about.triggered.connect(self.show_about)
+        help_menu.addAction(action_about)
+
+        action_system = QAction("&System Information", self)
+        action_system.triggered.connect(self.show_system_information)
+        help_menu.addAction(action_system)
+
+    def build_status_bar(self):
+        """
+        Persistent context that no single page owns: which dataset is
+        loaded, where the session is, and whether AI is usable. Before
+        this it was only visible on whichever page happened to show it.
+        """
+        bar = self.statusBar()
+
+        self.status_phase = QLabel("")
+        self.status_dataset = QLabel("")
+        self.status_ai = QLabel("")
+        self.status_offline = QLabel("OFFLINE / AIR-GAPPED")
+        self.status_offline.setObjectName("status_offline")
+
+        for widget in (self.status_phase, self.status_dataset):
+            widget.setObjectName("status_item")
+            bar.addWidget(widget)
+
+        bar.addPermanentWidget(self.status_ai)
+        bar.addPermanentWidget(self.status_offline)
+        self.status_ai.setObjectName("status_item")
+
+    def refresh_status_bar(self):
+        self.status_phase.setText(f"  {self.session.status_label}")
+
+        if self.session.dataset_label:
+            self.status_dataset.setText(f"|  {self.session.dataset_label}")
+        else:
+            self.status_dataset.setText("|  No dataset selected")
+
+        if self.session.last_assessment_at:
+            self.status_dataset.setText(
+                self.status_dataset.text()
+                + f"  |  Last assessment {self.session.last_assessment_at}")
+
+    def open_output_folder(self):
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.output_dir)))
+
+    def show_about(self):
+        self.notify(
+            "info",
+            f"About {APP_NAME}",
+            f"{APP_FULL_NAME}\n"
+            f"Version {APP_VERSION}\n\n"
+            f"{APP_TAGLINE}\n\n"
+            "Findings are produced by deterministic, auditable rules. "
+            "Every threshold is published in the assessment configuration "
+            "and every finding traces to the records behind it.\n\n"
+            "The optional AI layer only restates findings the rule engine "
+            "has already decided. It cannot create, remove, or re-score "
+            "one.",
+        )
+
+    def show_system_information(self):
+        import platform
+        import sys
+
+        status = self.current_ai_status()
+
+        self.notify(
+            "info",
+            "System Information",
+            f"{APP_NAME} {APP_VERSION}\n\n"
+            f"Python           {sys.version.split()[0]}\n"
+            f"Platform         {platform.system()} {platform.release()}\n"
+            f"Machine          {platform.machine()}\n\n"
+            f"Settings file    {self.settings_service.path}\n"
+            f"Output folder    {self.output_dir}\n\n"
+            f"Dataset formats  {describe_supported_inputs()}\n\n"
+            f"AI backend       {status.backend}\n"
+            f"AI status        {status.label()}\n\n"
+            "Network          not used. SAT-SA makes no external "
+            "connections; the optional AI layer runs on this machine only.",
+        )
+
+    # ============================================================
+    # LIFECYCLE
+    # ============================================================
+
+    def on_phase_changed(self, phase):
+        """
+        Single place that reacts to a lifecycle transition. Page gating,
+        the status bar, and the run action all follow from the phase
+        rather than each testing attributes for themselves.
+        """
+        has_results = self.session.has_results
+
+        for button in (self.findings_button, self.review_button,
+                        self.reports_button):
+            button.setEnabled(has_results)
+
+        for index in (2, 3, 4):
+            self.view_actions[index].setEnabled(has_results)
+
+        self.run_button.setEnabled(
+            self.session.can_run_assessment and not self.session.is_busy)
+        self.action_run.setEnabled(self.run_button.isEnabled())
+
+        for placeholder in (self.findings_placeholder,
+                             self.review_placeholder,
+                             self.reports_placeholder):
+            placeholder.setText(self.empty_state_text())
+
+        self.update_page_visibility()
+        self.refresh_status_bar()
+
+        # A results page the supervisor is standing on when results go
+        # away would otherwise show a stale table.
+        if not has_results and self.pages.currentIndex() in (2, 3, 4):
+            self.show_page(0)
+
+    def empty_state_text(self) -> str:
+        return (
+            "No assessment loaded.\n\n"
+            f"{self.session.guidance}\n\n"
+            "Go to New Assessment, choose a submission, and run it. "
+            "Findings, the review queue and reports appear here once an "
+            "assessment completes."
+        )
+
+    def update_page_visibility(self):
+        """Swap each results page between its placeholder and its content."""
+        has_results = self.session.has_results
+        for placeholder, content in (
+            (self.findings_placeholder, self.findings_content),
+            (self.review_placeholder, self.review_content),
+            (self.reports_placeholder, self.reports_content),
+        ):
+            placeholder.setVisible(not has_results)
+            content.setVisible(has_results)
+
+    # ============================================================
+    # WINDOW STATE
+    # ============================================================
+
+    def restore_window_state(self):
+        """
+        Reopen where the supervisor left off. Any failure here is
+        ignored: a remembered window position is a convenience and must
+        never be a reason the application will not start.
+        """
+        stored = self.settings_service.load_window_state()
+
+        geometry = stored.get("geometry")
+        if geometry:
+            try:
+                self.restoreGeometry(QByteArray.fromBase64(
+                    geometry.encode("ascii")))
+            except Exception:
+                pass
+
+        index = stored.get("page_index", 0)
+        # Never restore onto a results page: at launch there are no
+        # results, and the page would open on its empty state.
+        if isinstance(index, int) and index in (0, 1, 5):
+            self.show_page(index)
+
+    def save_window_state(self):
+        try:
+            self.settings_service.save_window_state(
+                geometry_b64=bytes(
+                    self.saveGeometry().toBase64()).decode("ascii"),
+                page_index=self.pages.currentIndex(),
+            )
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self.save_window_state()
+        super().closeEvent(event)
 
     def make_nav_button(self, text):
         button = QPushButton(text)
@@ -523,6 +782,9 @@ class MainWindow(QMainWindow):
         self.selected_dataset = path
         self.dataset_path = path
 
+        self.session.set_dataset(path, Path(path).name)
+        self.refresh_status_bar()
+
         self.progress_label.setText(
             f"Dataset selected: {path}"
         )
@@ -532,7 +794,8 @@ class MainWindow(QMainWindow):
     def dataset_rejected(self, reason):
         """The drop zone was given something the engine cannot read."""
         self.dataset_path = None
-        self.run_button.setEnabled(False)
+        self.session.set_dataset(None)
+        self.session.transition(Phase.NO_DATASET)
 
         self.set_validation_state(
             "error",
@@ -568,7 +831,7 @@ class MainWindow(QMainWindow):
             return
 
         self.validation_busy = True
-        self.run_button.setEnabled(False)
+        self.session.transition(Phase.VALIDATING)
         self.set_validation_state("running", "Validating dataset...")
 
         self.validation_thread = QThread()
@@ -600,7 +863,7 @@ class MainWindow(QMainWindow):
                 "The assessment cannot run until these are corrected.",
                 self.format_validation_issues(report),
             )
-            self.run_button.setEnabled(False)
+            self.session.transition(Phase.INVALID)
             return
 
         if warnings:
@@ -616,11 +879,11 @@ class MainWindow(QMainWindow):
                 "Validation PASSED — no structural issues found.",
             )
 
-        self.run_button.setEnabled(True)
+        self.session.transition(Phase.READY)
 
     def validation_error(self, message):
         self.validation_busy = False
-        self.run_button.setEnabled(False)
+        self.session.transition(Phase.NO_DATASET)
         self.set_validation_state(
             "error",
             "Dataset could not be read.",
@@ -661,6 +924,7 @@ class MainWindow(QMainWindow):
         self.current_ai_config = ai_config
 
         self.assessment_busy = True
+        self.session.transition(Phase.ASSESSING)
         self.assessment_log.clear()
 
         self.run_button.setEnabled(False)
@@ -731,8 +995,12 @@ class MainWindow(QMainWindow):
         )
 
     def assessment_finished(self, result):
+        import datetime
+
         self.assessment_busy = False
         self.current_result, self.current_ai_config = result
+        self.session.last_assessment_at = (
+            datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
 
         self.progress_label.setText(
             "Assessment completed."
@@ -745,10 +1013,11 @@ class MainWindow(QMainWindow):
             "✓ Assessment completed successfully."
         )
 
-        self.run_button.setEnabled(True)
-
         # Process all generated data
         self.prepare_result_data()
+
+        # Results now exist: the results pages become reachable.
+        self.session.transition(Phase.LOADED)
 
         # Refresh every application page
         self.refresh_dashboard()
@@ -782,6 +1051,7 @@ class MainWindow(QMainWindow):
         """
         self.assessment_busy = False
         self.current_validation_report = report
+        self.session.transition(Phase.INVALID)
 
         self.progress_label.setText("Assessment stopped — dataset validation failed.")
         self.assessment_log.append("")
@@ -792,7 +1062,6 @@ class MainWindow(QMainWindow):
                 f"    [{issue.severity}] {issue.table}: {issue.message}{rows}"
             )
 
-        self.run_button.setEnabled(False)
         self.set_validation_state(
             "error",
             f"Validation FAILED — {len(report.errors)} blocking error(s). "
@@ -971,6 +1240,11 @@ class MainWindow(QMainWindow):
 
     def assessment_failed(self, message):
         self.assessment_busy = False
+        # Back to READY: the dataset validated, the run did not. The
+        # supervisor can correct the cause and run again without
+        # re-selecting the submission.
+        self.session.transition(Phase.READY)
+
         self.progress_label.setText(
             "Assessment failed."
         )
@@ -978,8 +1252,6 @@ class MainWindow(QMainWindow):
         self.assessment_log.append(
             f"✗ ERROR: {message}"
         )
-
-        self.run_button.setEnabled(True)
 
         self.notify(
             "critical",
@@ -1066,6 +1338,18 @@ class MainWindow(QMainWindow):
         )
 
         layout.addWidget(description)
+
+        page_layout = layout
+        self.findings_placeholder = QLabel("")
+        self.findings_placeholder.setObjectName("empty_state")
+        self.findings_placeholder.setAlignment(Qt.AlignCenter)
+        self.findings_placeholder.setWordWrap(True)
+        page_layout.addWidget(self.findings_placeholder, 1)
+
+        self.findings_content = QWidget()
+        layout = QVBoxLayout(self.findings_content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(self.findings_content, 1)
 
         # Filters
         filters = QHBoxLayout()
@@ -1514,6 +1798,18 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(description)
 
+        page_layout = layout
+        self.review_placeholder = QLabel("")
+        self.review_placeholder.setObjectName("empty_state")
+        self.review_placeholder.setAlignment(Qt.AlignCenter)
+        self.review_placeholder.setWordWrap(True)
+        page_layout.addWidget(self.review_placeholder, 1)
+
+        self.review_content = QWidget()
+        layout = QVBoxLayout(self.review_content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(self.review_content, 1)
+
         self.review_table = QTableWidget()
         self.review_table.setColumnCount(
             9
@@ -1731,6 +2027,18 @@ class MainWindow(QMainWindow):
         )
 
         layout.addWidget(description)
+
+        page_layout = layout
+        self.reports_placeholder = QLabel("")
+        self.reports_placeholder.setObjectName("empty_state")
+        self.reports_placeholder.setAlignment(Qt.AlignCenter)
+        self.reports_placeholder.setWordWrap(True)
+        page_layout.addWidget(self.reports_placeholder, 1)
+
+        self.reports_content = QWidget()
+        layout = QVBoxLayout(self.reports_content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(self.reports_content, 1)
 
         self.report_status = QLabel(
             "No assessment outputs loaded."
@@ -2071,6 +2379,41 @@ class MainWindow(QMainWindow):
                 color: #7d8899;
                 border-left: 3px solid #3d4b5f;
             }
+            QLabel#empty_state {
+                color: #7d8899;
+                font-size: 13px;
+                line-height: 150%;
+                padding: 40px;
+            }
+            QStatusBar {
+                background-color: #131a24;
+                border-top: 1px solid #2b3648;
+            }
+            QStatusBar::item { border: none; }
+            QLabel#status_item {
+                color: #8c9ab0;
+                font-size: 11px;
+                padding: 2px 6px;
+            }
+            QLabel#status_offline {
+                color: #7fd1a0;
+                font-size: 10px;
+                font-weight: 700;
+                padding: 2px 10px;
+            }
+            QMenuBar {
+                background-color: #131a24;
+                color: #cfd8e6;
+                border-bottom: 1px solid #2b3648;
+            }
+            QMenuBar::item:selected { background-color: #23324a; }
+            QMenu {
+                background-color: #182231;
+                color: #cfd8e6;
+                border: 1px solid #2b3648;
+            }
+            QMenu::item:selected { background-color: #23324a; }
+            QMenu::item:disabled { color: #5a6474; }
             QLabel#settings_note {
                 color: #8c9ab0;
                 font-size: 11px;

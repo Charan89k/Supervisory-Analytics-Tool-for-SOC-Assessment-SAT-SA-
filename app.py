@@ -1,3 +1,24 @@
+"""
+LEGACY REFERENCE VIEW — NOT THE SAT-SA PRODUCT.
+
+The SAT-SA product is the offline PySide6 desktop application, launched
+with `python desktop.py`. This file is a Streamlit dashboard kept only
+as a development view of an assessment that has already been produced by
+`main.py`.
+
+It must NOT be used to evaluate or demonstrate SAT-SA:
+
+  * it runs a local web server and is viewed in a browser, and the
+    deployment requirements exclude browser and localhost applications
+  * it reads a previously written assessment_results.json; it cannot
+    ingest a submission, validate one, or run an assessment
+  * it has none of the desktop application's ingestion, validation,
+    explanation, or settings behaviour
+
+Kept rather than deleted because it remains a quick way to eyeball
+pipeline output during development. Nothing in the product imports it.
+"""
+
 import json
 from pathlib import Path
 

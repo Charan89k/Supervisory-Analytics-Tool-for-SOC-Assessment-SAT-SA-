@@ -26,6 +26,7 @@ levers that actually bound the work, so those are the defaults.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence
 
@@ -58,6 +59,40 @@ class NarrationScope:
 
     def severities(self) -> Optional[List[str]]:
         return SEVERITY_SCOPES.get(self.severity_scope, ["CRITICAL", "HIGH"])
+
+
+#: Fields a backend is allowed to see. Everything a finding carries that
+#: an explanation could legitimately draw on, and nothing else.
+NARRATION_INPUT_FIELDS = (
+    "finding_type", "rule_id", "soc_id", "severity", "alert_id", "case_id",
+    "assigned_analyst_id", "rationale", "evidence", "queue_rank",
+    "case_rank", "queue_priority", "case_priority", "case_finding_count",
+)
+
+
+def finding_view(record: dict) -> dict:
+    """
+    A defensive copy of one finding, for handing to a backend.
+
+    A backend receives data, never the authoritative record. Passing the
+    live dict meant a backend that mutated its argument — through a bug,
+    or deliberately — could rewrite a severity, a score, or the evidence
+    itself, and the change would land straight in the assessment the
+    supervisor acts on. The service could promise only that IT wrote
+    nothing but narration fields; it could not promise the record came
+    back unchanged.
+
+    The copy closes that. `evidence` is deep-copied because it is a
+    nested dict and a shallow copy would still share it. Whatever a
+    backend does to what it is given, the assessment is untouched.
+    """
+    view = {}
+    for field in NARRATION_INPUT_FIELDS:
+        if field not in record:
+            continue
+        value = record[field]
+        view[field] = deepcopy(value) if isinstance(value, (dict, list)) else value
+    return view
 
 
 @dataclass
@@ -155,7 +190,9 @@ def narrate_review_queue(
             outcome.cancelled = True
             break
 
-        result = backend.explain(record)
+        # The backend sees a copy. Anything it does to that copy is
+        # discarded; only the fields written below reach the record.
+        result = backend.explain(finding_view(record))
         if result is None:
             outcome.failed += 1
         else:

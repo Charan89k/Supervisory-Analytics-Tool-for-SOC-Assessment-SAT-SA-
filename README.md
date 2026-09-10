@@ -29,16 +29,16 @@ accusation). Supervisory judgement stays with the human reviewer.
 ## Architecture
 
 ```
-CSV ingestion -> validation -> normalization
+ingestion (CSV / JSON / ZIP / SQLite) -> validation -> normalization
     -> metrics (alerts, analysts, cases, escalations, telemetry)
     -> execution-gap detectors --\
     -> negative-space detectors --+-> finding counts -> risk scoring -> peer benchmarking
     -> supervisory review queue (ranks individual findings, not just entities)
     -> evidence drill-down (traces any finding back to source records)
     -> reporting (JSON / CSV / PDF)
-    -> offline Qwen narration layer (optional - restates findings in
-       plain language; never decides them)
-    -> Streamlit dashboard
+    -> local explanation layer (optional - restates findings in plain
+       language; never decides them)
+    -> PySide6 desktop application
 ```
 
 Scoring is deliberately linear and auditable:
@@ -49,9 +49,10 @@ and the final ranking.
 
 ## Detection rules
 
-**Execution gaps** (7): `MISSED_ESCALATION`, `SLOW_TRIAGE`,
+**Execution gaps** (9): `MISSED_ESCALATION`, `SLOW_TRIAGE`,
 `FAST_CLOSURE`, `MISSING_EVIDENCE`, `REOPENED_CASE`,
-`REPETITIVE_INVESTIGATION`, `ANALYST_OVERLOAD`
+`REPETITIVE_INVESTIGATION`, `ANALYST_OVERLOAD`,
+`ACK_WITHOUT_INVESTIGATION`, `REPEATED_ALERT_WITHOUT_REMEDIATION`
 
 **Negative space** (5): `TELEMETRY_GAP`, `MISSING_ALERT_CATEGORY`,
 `LOW_ACTIVITY_OUTLIER`, `MISSING_ESCALATION_RECORDS`,
@@ -60,65 +61,106 @@ and the final ranking.
 All thresholds live in `config/assessment_rules.yaml` - tunable
 without touching code, with every number commented.
 
-## Quickstart
+## The application
+
+**SAT-SA is a standalone offline desktop application.** It is not a web
+application, not a browser dashboard, and not a service. There is no
+server to start and no address to visit.
 
 ```bash
 python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-desktop.txt
 
 # Generate a synthetic dataset with seeded, reproducible ground truth
 python data/generator/generate_dataset.py --socs 5 --alerts-per-soc 800 --out data/synthetic
 
-# Run the assessment pipeline
-python main.py --data data/synthetic --out outputs --export-csv --export-pdf
+# Launch SAT-SA
+python desktop.py
+```
 
-# View the dashboard
-streamlit run app.py
+The workflow inside the application:
+
+```
+Launch -> Dashboard -> New Assessment -> select or drop a submission
+       -> validation result -> Run Assessment
+       -> Findings / Review Queue / Reports
+```
+
+Accepted submissions: a folder of CSV or JSON tables, a ZIP archive, a
+single JSON file, or a SQLite export. Archives are inspected for unsafe
+member paths and expansion limits before anything is written to disk.
+
+### Headless pipeline
+
+The same analytics run without a GUI, for scripted or batch assessment:
+
+```bash
+python main.py --data data/synthetic --out outputs --export-csv --export-pdf
 ```
 
 `main.py` flags:
 - `--export-csv` - writes `entity_risk_scores.csv`, `execution_gap_findings.csv`,
   `negative_space_findings.csv`, `review_queue.csv` alongside the JSON output
 - `--export-pdf` - writes a one-page-per-entity `executive_summary.pdf`
-- `--narrate` - runs the review queue through the offline Qwen layer
-  (requires a local Ollama instance running the model configured in
-  `llm_narration` in the config; falls back to the rule-generated
-  rationale if unavailable)
+- `--narrate` - runs the top of the review queue through the local
+  explanation layer (see below). Falls back to the rule-generated
+  rationale whenever no local model is available, so the flag is always
+  safe to pass.
 
-## Offline LLM narration — a deliberate design tradeoff
+### `app.py` is not the application
 
-The Qwen narration layer is optional, offline, and disposable by
-design — not something bolted on to work around a limitation:
+`app.py` is a **legacy Streamlit dashboard**, kept only as a development
+and reference view of an assessment that has already been produced. It
+is not the product, it is not part of the deliverable, and it should not
+be used to evaluate SAT-SA: it runs a local web server, which the
+deployment requirements explicitly exclude. The desktop application
+(`desktop.py`) is the only supported interface.
 
-- **Never load-bearing.** Every finding already has a deterministic,
-  rule-generated `rationale` before narration ever runs. Narration
-  only restates that rationale in clearer prose for a human reviewer;
-  it never decides a finding, changes a `finding_type`/`rule_id`, or
-  touches a risk score. Disable it entirely and the pipeline output
-  is identical in substance, just less polished in wording.
-- **Fails silently, by design.** If Ollama isn't installed, the model
-  isn't pulled, or a call times out, `llm_narration.py` catches the
-  failure and returns the rule-generated rationale untouched — no
-  crash, no broken pipeline run, no visible error. This is
-  intentional: a UX nicety should never be able to take down the
-  core analytics.
-- **Offline means local compute, not local speed.** Running Qwen
-  through Ollama keeps the data on-machine and avoids any external
-  API calls, which matters for a security-supervisory tool. It does
-  *not* mean fast — a 14B-parameter model does the same matrix math
-  locally that it would in the cloud, just on whatever CPU/GPU is in
-  the laptop running it. On CPU-only hardware, expect on the order of
-  minutes per finding, not seconds.
-- **Precompute, don't demo live.** Because of the above, the intended
-  workflow is to run `python main.py --narrate` once, ahead of time,
-  on a machine that has Qwen pulled, and ship the resulting
-  `assessment_results.json` (with `narrated_explanation` fields
-  already populated) as part of the submission — rather than asking
-  a judge's machine to reproduce the narration step live. The
-  dashboard and core pipeline run in seconds on any machine with
-  Python installed, with zero setup beyond `pip install -r
-  requirements.txt`; narration is a separate, optional enhancement
-  layered on top of that baseline, not a dependency of it.
+## Local explanation layer — optional by design
+
+An optional local language model can restate findings in plainer prose
+for a reviewer. It is architecturally incapable of doing more than that:
+
+- **Never load-bearing.** Every finding already carries a deterministic,
+  rule-generated `rationale` before narration runs. Turn the layer off
+  entirely and the assessment output is identical in substance.
+- **Cannot alter a finding.** The narration service writes only
+  `narration_*` fields, and a backend is handed a defensive copy of the
+  finding rather than the authoritative record — so a backend that
+  mutates what it is given changes nothing. It cannot create, remove, or
+  re-score a finding, change a severity, or invent evidence.
+- **Fails without failing the assessment.** If no model is available the
+  application reports "AI unavailable" and every finding keeps its rule
+  rationale. The assessment still completes.
+- **Bounded by default.** An assessment produces ~1,500 findings; the
+  default sends **10** to the model, chosen by review-queue rank. Severity
+  is not the scope control — the queue is already almost entirely
+  Critical/High, so filtering on it bounds nothing.
+
+### Backends
+
+```
+LocalLLMBackend
+├── LlamaCppBackend   shipped: a local .gguf file, no service to install
+├── OllamaBackend     development convenience on a workstation
+└── MockBackend       tests and demo: deterministic samples, no model
+```
+
+`LlamaCppBackend` is the deployment path. The model is a **data file**
+that travels on the same media as the dataset, not installed software —
+an easier story for an air-gapped environment than a background service
+on a TCP port. Updating the model means replacing the file.
+
+`MockBackend` produces deterministic sample text so the whole narration
+pipeline can be developed and tested without executing a multi-gigabyte
+model. Its output is labelled `[SAMPLE EXPLANATION]`, carries
+`is_mock=True`, and states that no language model was involved — it is
+never presentable as model analysis.
+
+**Offline means local compute, not local speed.** A 7B model on a
+CPU-only laptop takes roughly 1-4 minutes per explanation. The AI layer
+is off by default, and the default model is `qwen2.5:7b` — never the
+14B, which needs ~9 GB resident.
 
 ## Synthetic data & ground truth
 
@@ -137,18 +179,26 @@ risk profiles so the dataset is defensible rather than arbitrary:
 ## Testing
 
 ```bash
-pytest
+pytest                                    # full suite
+python tests/smoke_ui.py                  # headless UI smoke test
 ```
 
 Every detection rule has both a positive case (fires) and a negative
 case (does not fire) - a rule that's only ever tested on cases where
 it should fire says nothing about its false-positive rate.
 
+Neither the suite nor the smoke test loads a language model. Roughly
+half the ingestion tests are adversarial, building genuinely malicious
+archives (path traversal, symlink members, zip bombs) and asserting
+nothing is written outside the extraction root.
+
 ## Project layout
 
 ```
 analytics/
-  loader.py, validator.py, normalizer.py   # ingestion pipeline
+  ingestion/                                # CSV/JSON/ZIP/SQLite adapters + safe extraction
+  loader.py, validator.py, normalizer.py    # ingestion pipeline
+  narration/                                # local explanation backends
   metrics/                                  # alert/analyst/case/escalation/telemetry metrics
   detection/                                # execution_gaps.py, negative_space.py
   scoring/                                  # score.py, benchmark.py
@@ -159,7 +209,12 @@ analytics/
 schemas/assessment_result.py                # output contract (dataclasses)
 data/generator/generate_dataset.py          # synthetic dataset with seeded ground truth
 config/assessment_rules.yaml                # every threshold, weight, and setting
-app.py                                      # Streamlit dashboard
-main.py                                     # end-to-end pipeline entrypoint
-tests/test_detectors.py                     # rule-level test suite
+desktop.py                                  # THE APPLICATION — launch this
+application/                                # PySide6 desktop app
+  ui.py, session.py, version.py             #   window, lifecycle state, identity
+  pages/, widgets/, services/               #   settings page, drop zone, services
+main.py                                     # headless pipeline entrypoint
+app.py                                      # legacy Streamlit view — NOT the product
+tests/                                      # detectors, ingestion, narration,
+                                            #   pipeline, and a headless UI smoke test
 ```

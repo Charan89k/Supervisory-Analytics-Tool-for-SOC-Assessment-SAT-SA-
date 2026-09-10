@@ -62,13 +62,7 @@ class SettingsService:
         """
         fallback = default or AIConfig()
 
-        try:
-            with open(self.path, encoding="utf-8") as handle:
-                stored = json.load(handle)
-        except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeDecodeError):
-            return fallback
-
-        section = stored.get("ai")
+        section = self._read_section("ai")
         if not isinstance(section, dict):
             return fallback
 
@@ -82,17 +76,47 @@ class SettingsService:
             return fallback
 
     def save_ai_config(self, config: AIConfig) -> Path:
-        stored = {}
-        if self.path.exists():
-            try:
-                with open(self.path, encoding="utf-8") as handle:
-                    stored = json.load(handle)
-            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-                stored = {}
-        if not isinstance(stored, dict):
-            stored = {}
+        return self._write_section("ai", asdict(config))
 
-        stored["ai"] = asdict(config)
+    # -- window ------------------------------------------------------
+
+    def load_window_state(self) -> dict:
+        """
+        Geometry and the page the supervisor was last on.
+
+        Returns {} when nothing is stored or the file is unusable, which
+        the caller treats as "use the defaults" — a remembered window
+        position is a convenience and must never block startup.
+        """
+        section = self._read_section("window")
+        return section if isinstance(section, dict) else {}
+
+    def save_window_state(self, geometry_b64: str = "",
+                           window_state_b64: str = "",
+                           page_index: int = 0) -> Path:
+        return self._write_section("window", {
+            "geometry": geometry_b64,
+            "state": window_state_b64,
+            "page_index": int(page_index),
+        })
+
+    # -- file --------------------------------------------------------
+
+    def _read_all(self) -> dict:
+        try:
+            with open(self.path, encoding="utf-8") as handle:
+                stored = json.load(handle)
+        except (FileNotFoundError, json.JSONDecodeError, OSError,
+                UnicodeDecodeError):
+            return {}
+        return stored if isinstance(stored, dict) else {}
+
+    def _read_section(self, name: str):
+        return self._read_all().get(name)
+
+    def _write_section(self, name: str, payload: dict) -> Path:
+        stored = self._read_all()
+        stored[name] = payload
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Write via a temporary file so an interrupted save cannot leave
