@@ -5,8 +5,22 @@ __pycache__/
 .env
 .env.*
 .DS_Store
+
+# Generated datasets — regenerate with data/generator/generate_dataset.py
 data/synthetic/
-outputs/*.json
-outputs/*.csv
-outputs/*.pdf
+
+# Assessment outputs are generated artifacts, never source. The previous
+# patterns only matched the top level, so anything written to a
+# subdirectory (outputs/desktop_assessment/, which is where the desktop
+# app writes) was still being picked up.
+outputs/**
 !outputs/.gitkeep
+
+# Local assessment history (Phase 13) — per-run output directories.
+assessments/
+
+# Local AI models. A .gguf is 2-9 GB and is deployment media, not source.
+*.gguf
+*.bin
+*.safetensors
+models/

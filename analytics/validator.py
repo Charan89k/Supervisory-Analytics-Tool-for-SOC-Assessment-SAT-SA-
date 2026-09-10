@@ -41,6 +41,14 @@ class ValidationReport:
     def has_errors(self) -> bool:
         return any(i.severity == "ERROR" for i in self.issues)
 
+    @property
+    def errors(self) -> List[ValidationIssue]:
+        return [i for i in self.issues if i.severity == "ERROR"]
+
+    @property
+    def warnings(self) -> List[ValidationIssue]:
+        return [i for i in self.issues if i.severity == "WARNING"]
+
     def add(self, table, severity, message, row_count=0):
         self.issues.append(ValidationIssue(table, severity, message, row_count))
 
@@ -50,6 +58,45 @@ class ValidationReport:
             lines.append(f"  [{i.severity}] {i.table}: {i.message}"
                          + (f" ({i.row_count} rows)" if i.row_count else ""))
         return "\n".join(lines)
+
+    def to_dict(self) -> dict:
+        """The shape main.py embeds in assessment_results.json."""
+        return {
+            "issue_count": len(self.issues),
+            "error_count": len(self.errors),
+            "warning_count": len(self.warnings),
+            "issues": [
+                {"table": i.table, "severity": i.severity,
+                 "message": i.message, "row_count": i.row_count}
+                for i in self.issues
+            ],
+        }
+
+
+class DatasetValidationError(Exception):
+    """
+    Raised when a dataset fails ERROR-level validation and the pipeline
+    cannot proceed.
+
+    Carries the full ValidationReport rather than just a message, so a
+    caller (notably the desktop UI) can show the supervisor every issue
+    found — which table, which severity, how many rows — instead of a
+    bare "assessment failed". The official PS requires the validation
+    result to be a visible step in the workflow, not a log line.
+    """
+
+    def __init__(self, report: "ValidationReport", data_path: str = ""):
+        self.report = report
+        self.data_path = data_path
+        super().__init__(self.message())
+
+    def message(self) -> str:
+        errors = self.report.errors
+        head = (f"Dataset validation failed — {len(errors)} blocking "
+                f"error(s) must be corrected before an assessment can run.")
+        if self.data_path:
+            head += f"\nDataset: {self.data_path}"
+        return head + "\n\n" + self.report.summary()
 
 
 def validate_dataset(data: dict) -> ValidationReport:

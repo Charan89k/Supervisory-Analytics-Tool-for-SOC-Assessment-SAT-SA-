@@ -27,11 +27,14 @@ from analytics.detection.execution_gaps import (
     detect_reopened_cases,
     detect_repetitive_investigations,
     detect_analyst_overload,
+    detect_ack_without_investigation,
+    detect_repeated_alerts_without_remediation,
 )
 from analytics.detection.negative_space import (
     detect_telemetry_gaps,
     detect_missing_escalation_records,
     detect_missing_investigations,
+    detect_missing_categories,
 )
 from analytics.review_queue import build_review_queue
 
@@ -58,7 +61,12 @@ def make_alert(**overrides):
         "ack_delay_minutes": 5.0,
         "investigation_duration_minutes": 60.0,
         "has_evidence": True,
+        "was_acknowledged": True,
+        "investigation_started": True,
+        "was_closed": True,
         "was_reopened": False,
+        "asset_id": "ASSET-0001",
+        "category": "MALWARE",
     }
     base.update(overrides)
     return pd.DataFrame([base])
@@ -327,29 +335,59 @@ def test_analyst_overload_does_not_fire_on_even_distribution(cfg):
 # MISSING_ESCALATION_RECORDS (negative space)
 # ---------------------------------------------------------------------------
 
-def test_missing_escalation_records_fires_with_no_escalation_data(cfg):
-    alerts = pd.DataFrame([
-        {"alert_id": "ALT-1", "soc_id": "SOC-TEST", "severity": "HIGH", "escalation_required": pd.NA},
-        {"alert_id": "ALT-2", "soc_id": "SOC-TEST", "severity": "CRITICAL", "escalation_required": pd.NA},
+def _high_crit_alerts(n, with_records, soc_id="SOC-TEST"):
+    """n HIGH/CRITICAL alerts, the first `with_records` carrying an escalation row."""
+    return pd.DataFrame([
+        {"alert_id": f"ALT-{i}", "soc_id": soc_id, "severity": "HIGH",
+         "escalation_required": (True if i < with_records else pd.NA)}
+        for i in range(n)
     ])
-    result = detect_missing_escalation_records(alerts, cfg)
+
+
+def test_missing_escalation_records_fires_with_no_escalation_data(cfg):
+    result = detect_missing_escalation_records(_high_crit_alerts(20, 0), cfg)
     assert len(result) == 1
     assert result.iloc[0]["finding_type"] == "MISSING_ESCALATION_RECORDS"
     assert result.iloc[0]["soc_id"] == "SOC-TEST"
+    assert result.iloc[0]["evidence"]["escalation_record_coverage"] == 0.0
+
+
+def test_missing_escalation_records_fires_on_sparse_coverage(cfg):
+    """
+    The case the old all-or-nothing rule missed entirely: records exist,
+    but for only a small minority of the alerts that should have them.
+    2 of 20 = 10% coverage is broken record-keeping, not compliance.
+    """
+    result = detect_missing_escalation_records(_high_crit_alerts(20, 2), cfg)
+    assert len(result) == 1
+    assert result.iloc[0]["evidence"]["escalation_record_coverage"] == 0.1
+    assert result.iloc[0]["evidence"]["escalation_records_found"] == 2
 
 
 def test_missing_escalation_records_does_not_fire_when_records_present(cfg):
-    alerts = pd.DataFrame([
-        {"alert_id": "ALT-1", "soc_id": "SOC-TEST", "severity": "HIGH", "escalation_required": True},
-        {"alert_id": "ALT-2", "soc_id": "SOC-TEST", "severity": "CRITICAL", "escalation_required": False},
-    ])
-    result = detect_missing_escalation_records(alerts, cfg)
+    result = detect_missing_escalation_records(_high_crit_alerts(20, 20), cfg)
     assert result.empty
+
+
+def test_missing_escalation_records_does_not_fire_at_adequate_coverage(cfg):
+    """80% coverage is above the 50% threshold — imperfect, not a finding."""
+    result = detect_missing_escalation_records(_high_crit_alerts(20, 16), cfg)
+    assert result.empty
+
+
+def test_missing_escalation_records_ignores_small_sample(cfg):
+    """
+    Zero records across 5 alerts is too small a sample to conclude the
+    entity does not keep escalation records at all.
+    """
+    result = detect_missing_escalation_records(_high_crit_alerts(5, 0), cfg)
+    assert result.empty, "too few HIGH/CRITICAL alerts for a coverage conclusion"
 
 
 def test_missing_escalation_records_ignores_socs_with_no_high_crit(cfg):
     alerts = pd.DataFrame([
-        {"alert_id": "ALT-1", "soc_id": "SOC-TEST", "severity": "LOW", "escalation_required": pd.NA},
+        {"alert_id": f"ALT-{i}", "soc_id": "SOC-TEST", "severity": "LOW",
+         "escalation_required": pd.NA} for i in range(20)
     ])
     result = detect_missing_escalation_records(alerts, cfg)
     assert result.empty, "a SOC with no HIGH/CRITICAL alerts has nothing to escalate"
@@ -413,3 +451,212 @@ def test_review_queue_ranks_by_weight_and_severity(cfg):
 def test_review_queue_empty_when_no_findings(cfg):
     queue = build_review_queue(pd.DataFrame(), pd.DataFrame(), cfg)
     assert queue.empty
+
+
+# ---------------------------------------------------------------------------
+# ACK_WITHOUT_INVESTIGATION (execution gap)
+# ---------------------------------------------------------------------------
+
+def test_ack_without_investigation_fires_on_closed_uninvestigated_alert(cfg):
+    alerts = make_alert(
+        severity="CRITICAL",
+        was_acknowledged=True,
+        investigation_started=False,
+        was_closed=True,
+    )
+    result = detect_ack_without_investigation(alerts, cfg)
+    assert len(result) == 1
+    assert result.iloc[0]["finding_type"] == "ACK_WITHOUT_INVESTIGATION"
+    assert result.iloc[0]["rule_id"] == "INVESTIGATION-ABSENT-001"
+    assert result.iloc[0]["evidence"]["investigation_started"] is False
+
+
+def test_ack_without_investigation_does_not_fire_on_in_flight_alert(cfg):
+    """
+    The false-positive case this rule exists to avoid. An alert that has
+    been acknowledged and not yet investigated is an analyst part-way
+    through their work, not an execution gap. Without the closed-status
+    condition this rule flags every open alert in the submission.
+    """
+    alerts = make_alert(
+        severity="CRITICAL",
+        was_acknowledged=True,
+        investigation_started=False,
+        was_closed=False,
+    )
+    result = detect_ack_without_investigation(alerts, cfg)
+    assert result.empty, "in-flight work must not be reported as a gap"
+
+
+def test_ack_without_investigation_does_not_fire_when_investigated(cfg):
+    alerts = make_alert(
+        severity="CRITICAL",
+        was_acknowledged=True,
+        investigation_started=True,
+        was_closed=True,
+    )
+    result = detect_ack_without_investigation(alerts, cfg)
+    assert result.empty
+
+
+def test_ack_without_investigation_ignores_low_medium_severity(cfg):
+    """Closing a LOW alert after triage without a formal investigation
+    record is normal practice, not a supervisory finding."""
+    for severity in ("LOW", "MEDIUM"):
+        alerts = make_alert(
+            severity=severity,
+            was_acknowledged=True,
+            investigation_started=False,
+            was_closed=True,
+        )
+        assert detect_ack_without_investigation(alerts, cfg).empty
+
+
+# ---------------------------------------------------------------------------
+# REPEATED_ALERT_WITHOUT_REMEDIATION (execution gap; min_occurrences=3)
+# ---------------------------------------------------------------------------
+
+def _recurring_alerts(n, asset="ASSET-9999", category="MALWARE", severity="HIGH"):
+    return pd.DataFrame([
+        {"alert_id": f"ALT-{i}", "case_id": f"CASE-{i}", "soc_id": "SOC-TEST",
+         "assigned_analyst_id": "ANL-1", "severity": severity,
+         "asset_id": asset, "category": category}
+        for i in range(n)
+    ])
+
+
+def _recurring_cases(n, reason):
+    return pd.DataFrame([
+        {"case_id": f"CASE-{i}", "alert_id": f"ALT-{i}", "soc_id": "SOC-TEST",
+         "resolution_reason": reason}
+        for i in range(n)
+    ])
+
+
+def test_repeated_alert_fires_when_no_closure_records_remediation(cfg):
+    alerts = _recurring_alerts(4)
+    cases = _recurring_cases(4, "False positive - benign activity")
+    result = detect_repeated_alerts_without_remediation(alerts, cases, cfg)
+    assert len(result) == 1
+    assert result.iloc[0]["finding_type"] == "REPEATED_ALERT_WITHOUT_REMEDIATION"
+    assert result.iloc[0]["evidence"]["alert_count"] == 4
+    assert result.iloc[0]["evidence"]["asset_id"] == "ASSET-9999"
+
+
+def test_repeated_alert_does_not_fire_below_min_occurrences(cfg):
+    alerts = _recurring_alerts(2)
+    cases = _recurring_cases(2, "False positive - benign activity")
+    result = detect_repeated_alerts_without_remediation(alerts, cases, cfg)
+    assert result.empty, "two alerts is not a recurrence pattern"
+
+
+def test_repeated_alert_does_not_fire_when_remediation_recorded(cfg):
+    """One documented remediation is enough: the root cause was addressed,
+    so recurrence afterwards is a different question."""
+    alerts = _recurring_alerts(4)
+    cases = _recurring_cases(4, "False positive - benign activity")
+    cases.loc[2, "resolution_reason"] = "True positive - remediated"
+    result = detect_repeated_alerts_without_remediation(alerts, cases, cfg)
+    assert result.empty
+
+
+def test_repeated_alert_does_not_group_across_assets(cfg):
+    """Four alerts spread over four assets is not one asset recurring."""
+    alerts = _recurring_alerts(4)
+    alerts["asset_id"] = [f"ASSET-{i}" for i in range(4)]
+    cases = _recurring_cases(4, "Duplicate of existing case")
+    result = detect_repeated_alerts_without_remediation(alerts, cases, cfg)
+    assert result.empty
+
+
+def test_repeated_alert_does_not_group_across_categories(cfg):
+    """One asset with four different problems is not one unremediated cause."""
+    alerts = _recurring_alerts(4)
+    alerts["category"] = ["MALWARE", "PHISHING", "RECON", "DATA_EXFIL"]
+    cases = _recurring_cases(4, "Duplicate of existing case")
+    result = detect_repeated_alerts_without_remediation(alerts, cases, cfg)
+    assert result.empty
+
+
+# ---------------------------------------------------------------------------
+# MISSING_ALERT_CATEGORY (negative space; peer_presence_fraction=0.6)
+# ---------------------------------------------------------------------------
+
+def _category_coverage(mapping):
+    return pd.DataFrame([
+        {"soc_id": soc, "categories_observed": set(cats)}
+        for soc, cats in mapping.items()
+    ])
+
+
+def test_missing_alert_category_fires_when_peers_have_it(cfg):
+    coverage = _category_coverage({
+        "SOC-1": ["MALWARE", "PHISHING"],
+        "SOC-2": ["MALWARE", "PHISHING"],
+        "SOC-3": ["MALWARE", "PHISHING"],
+        "SOC-4": ["MALWARE"],  # no PHISHING
+    })
+    result = detect_missing_categories(coverage, cfg)
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["soc_id"] == "SOC-4"
+    assert row["category"] == "PHISHING"
+    assert row["finding_type"] == "MISSING_ALERT_CATEGORY"
+    assert row["evidence"]["peers_with_category"] == 3
+
+
+def test_missing_alert_category_does_not_fire_when_all_peers_have_it(cfg):
+    coverage = _category_coverage({
+        "SOC-1": ["MALWARE", "PHISHING"],
+        "SOC-2": ["MALWARE", "PHISHING"],
+        "SOC-3": ["MALWARE", "PHISHING"],
+    })
+    assert detect_missing_categories(coverage, cfg).empty
+
+
+def test_missing_alert_category_does_not_fire_for_uncommon_category(cfg):
+    """
+    A category only one peer in four produces is not an expected
+    capability — absence elsewhere says nothing about those entities.
+    """
+    coverage = _category_coverage({
+        "SOC-1": ["MALWARE", "EXOTIC_ICS"],
+        "SOC-2": ["MALWARE"],
+        "SOC-3": ["MALWARE"],
+        "SOC-4": ["MALWARE"],
+    })
+    result = detect_missing_categories(coverage, cfg)
+    assert result.empty, "25% peer presence is below the 60% expectation threshold"
+
+
+# ---------------------------------------------------------------------------
+# Scoring contract
+# ---------------------------------------------------------------------------
+
+def test_every_emitted_finding_type_has_a_scoring_weight(cfg):
+    """
+    Structural guard. compute_entity_risk_scores() looks up
+    finding_type.lower() in scoring.weights; a key that does not match
+    contributes 0.0 to the risk score and falls back to weight 1.0 in
+    the review queue, silently, with no error anywhere.
+
+    That is exactly what happened to MISSING_ALERT_CATEGORY, whose
+    weight was keyed `missing_category` — undetected because the rule
+    never fired on the synthetic data. This test fails the moment a new
+    rule ships without a weight, or a weight key is renamed apart from
+    its finding_type.
+    """
+    emitted = {
+        "MISSED_ESCALATION", "SLOW_TRIAGE", "FAST_CLOSURE", "MISSING_EVIDENCE",
+        "REOPENED_CASE", "REPETITIVE_INVESTIGATION", "ANALYST_OVERLOAD",
+        "ACK_WITHOUT_INVESTIGATION", "REPEATED_ALERT_WITHOUT_REMEDIATION",
+        "TELEMETRY_GAP", "MISSING_ALERT_CATEGORY", "LOW_ACTIVITY_OUTLIER",
+        "MISSING_ESCALATION_RECORDS", "MISSING_INVESTIGATIONS",
+    }
+    weights = cfg["scoring"]["weights"]
+
+    missing = sorted(t for t in emitted if t.lower() not in weights)
+    assert not missing, f"finding types with no scoring weight: {missing}"
+
+    orphaned = sorted(k for k in weights if k.upper() not in emitted)
+    assert not orphaned, f"weight keys no detector emits: {orphaned}"

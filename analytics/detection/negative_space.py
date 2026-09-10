@@ -70,8 +70,19 @@ def detect_missing_categories(alert_categories_by_soc: pd.DataFrame, cfg: dict) 
                 "rationale": (
                     f"'{category}' alerts appear for "
                     f"{round(peer_presence * 100, 1)}% of peer entities but "
-                    f"were not observed for this entity during the assessment period."
+                    f"were not observed for this entity during the assessment "
+                    f"period. Absence of a category may reflect a genuine "
+                    f"monitoring blind spot or simply a different technology "
+                    f"footprint — it is an indicator for review, not a defect "
+                    f"on its own."
                 ),
+                "evidence": {
+                    "missing_category": category,
+                    "peer_presence_fraction": round(peer_presence, 3),
+                    "peer_presence_threshold": presence_fraction,
+                    "peer_entity_count": int(n_socs),
+                    "peers_with_category": int(present_mask.sum()),
+                },
             })
     return pd.DataFrame(findings)
 
@@ -108,41 +119,65 @@ def detect_low_activity_outliers(alert_volume_by_soc: pd.DataFrame, cfg: dict) -
 
 def detect_missing_escalation_records(alerts_enriched: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """
-    Flags entities where HIGH/CRITICAL alerts exist but NO escalation
-    record of any kind (required or not) is present for the whole SOC.
-    This is deliberately distinct from MISSED_ESCALATION (an execution
-    gap, where a specific alert's escalation record shows it should
-    have escalated but didn't): this rule catches the absence case —
-    a SOC that doesn't appear to keep escalation records at all, which
-    a per-alert rule can never surface because there's no row to flag.
+    Flags entities whose HIGH/CRITICAL alerts largely carry NO
+    escalation record of any kind (initiated or not).
+
+    Deliberately distinct from MISSED_ESCALATION (an execution gap
+    where a specific alert's escalation record shows it should have
+    escalated but didn't): this rule catches the absence case — an
+    entity that does not appear to keep escalation records reliably,
+    which a per-alert rule can never surface because there is no row
+    to flag.
+
+    Measured as COVERAGE, not as total absence. The earlier version
+    fired only when an entity had literally zero escalation rows,
+    which meant it never fired on real data: an entity logging 50
+    escalation records against 800 alerts — 6% coverage, clearly
+    broken record-keeping — scored identically to a fully compliant
+    one, because 50 is not 0. Coverage also degrades gracefully: an
+    entity at 45% is flagged, an entity at 95% is not, and the
+    evidence records the actual ratio so a supervisor can judge.
     """
     required_severities = cfg["escalation"]["required_severities"]
+    coverage_threshold = cfg["negative_space"].get(
+        "escalation_record_coverage_fraction", 0.5)
+    min_alerts = cfg["negative_space"].get(
+        "escalation_record_min_high_crit_alerts", 10)
+
     high_crit = alerts_enriched[alerts_enriched["severity"].isin(required_severities)]
     if high_crit.empty:
         return pd.DataFrame()
 
-    has_any_escalation_data = alerts_enriched["escalation_required"].notna()
-    socs_with_records = set(alerts_enriched.loc[has_any_escalation_data, "soc_id"].unique())
-    socs_with_high_crit = set(high_crit["soc_id"].unique())
-    missing_socs = socs_with_high_crit - socs_with_records
-
-    if not missing_socs:
-        return pd.DataFrame()
-
     findings = []
-    for soc_id in missing_socs:
-        count = len(high_crit[high_crit["soc_id"] == soc_id])
+    for soc_id, group in high_crit.groupby("soc_id"):
+        total = len(group)
+        if total < min_alerts:
+            continue  # too few alerts for coverage to mean anything
+
+        with_records = int(group["escalation_required"].notna().sum())
+        coverage = with_records / total if total else 0.0
+        if coverage >= coverage_threshold:
+            continue
+
         findings.append({
             "soc_id": soc_id,
             "finding_type": "MISSING_ESCALATION_RECORDS",
             "rule_id": "ESCALATION-RECORDKEEPING-001",
             "rationale": (
-                f"{count} HIGH/CRITICAL alert(s) exist for this entity but no "
-                "escalation record of any kind was found for the assessment "
-                "period — a potential gap in escalation record-keeping, "
-                "distinct from any single alert failing to escalate."
+                f"Only {with_records} of {total} HIGH/CRITICAL alerts "
+                f"({round(coverage * 100, 1)}%) for this entity carry an "
+                f"escalation record of any kind, below the "
+                f"{round(coverage_threshold * 100, 1)}% threshold — a potential "
+                "gap in escalation record-keeping, distinct from any single "
+                "alert failing to escalate. Where no record exists, whether "
+                "escalation occurred cannot be determined either way."
             ),
-            "evidence": {"high_critical_alert_count": count, "escalation_records_found": 0},
+            "evidence": {
+                "high_critical_alert_count": total,
+                "escalation_records_found": with_records,
+                "escalation_record_coverage": round(coverage, 3),
+                "coverage_threshold": coverage_threshold,
+            },
         })
     return pd.DataFrame(findings)
 

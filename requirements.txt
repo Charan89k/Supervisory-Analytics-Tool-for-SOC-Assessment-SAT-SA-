@@ -1,7 +1,7 @@
+# SAT-SA — core analytics engine.
+# Everything the deterministic pipeline (main.py) needs, and nothing
+# that assumes a GUI. Install this alone to run assessments headless.
 pandas
 pyyaml
-streamlit
-plotly
-pytest
 reportlab
 requests

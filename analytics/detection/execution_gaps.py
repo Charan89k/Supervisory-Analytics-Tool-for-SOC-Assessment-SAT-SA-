@@ -249,6 +249,167 @@ def detect_analyst_overload(alerts_enriched: pd.DataFrame, cfg: dict) -> pd.Data
                      "finding_type", "rule_id", "rationale", "evidence"]]
 
 
+def detect_ack_without_investigation(alerts_enriched: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """
+    Flags alerts that were acknowledged and then CLOSED with no
+    INVESTIGATION_STARTED event ever recorded — the official PS
+    execution-gap example "alerts acknowledged but not meaningfully
+    investigated".
+
+    The `was_closed` condition is load-bearing, not defensive padding.
+    Without it this rule matches every alert that has been picked up
+    but not yet worked — on the current dataset that is 480 alerts,
+    all of them OPEN or IN_PROGRESS, i.e. analysts doing their job at
+    the moment the submission was cut. Flagging in-flight work as an
+    execution gap would give the rule a 100% false-positive rate and
+    train supervisors to ignore it. The gap is only real once the
+    entity has declared the alert finished: acknowledged, closed, and
+    no investigation in between.
+
+    Distinct from FAST_CLOSURE (an investigation happened but was too
+    short to be credible) and from MISSING_EVIDENCE (an investigation
+    may have happened but left no evidence record). Here there is no
+    investigation record at all.
+    """
+    severities = cfg["execution_gaps"].get(
+        "ack_without_investigation_severities", ["HIGH", "CRITICAL"]
+    )
+
+    flagged = alerts_enriched[
+        (alerts_enriched["was_acknowledged"] == True) &  # noqa: E712
+        (alerts_enriched["investigation_started"] == False) &  # noqa: E712
+        (alerts_enriched["was_closed"] == True) &  # noqa: E712
+        (alerts_enriched["severity"].isin(severities))
+    ].copy()
+
+    if flagged.empty:
+        return pd.DataFrame()
+
+    flagged["finding_type"] = "ACK_WITHOUT_INVESTIGATION"
+    flagged["rule_id"] = "INVESTIGATION-ABSENT-001"
+    flagged["rationale"] = (
+        "Severity " + flagged["severity"].astype(str) + " alert was acknowledged "
+        "and later closed, but no investigation was ever started on it — the "
+        "alert lifecycle records an acknowledgement and a closure with nothing "
+        "in between. This may indicate acknowledgement-only handling that "
+        "satisfies response-time metrics without examining the alert."
+    )
+    flagged["evidence"] = flagged.apply(lambda r: {
+        "severity": r["severity"],
+        "acknowledged": True,
+        "investigation_started": False,
+        "closed": True,
+        "ack_delay_minutes": (round(r["ack_delay_minutes"], 1)
+                              if pd.notna(r["ack_delay_minutes"]) else None),
+        "expected_lifecycle_event": "INVESTIGATION_STARTED",
+    }, axis=1)
+
+    return flagged[["alert_id", "case_id", "soc_id", "assigned_analyst_id", "severity",
+                     "finding_type", "rule_id", "rationale", "evidence"]]
+
+
+def detect_repeated_alerts_without_remediation(alerts_enriched: pd.DataFrame,
+                                                 cases: pd.DataFrame,
+                                                 cfg: dict) -> pd.DataFrame:
+    """
+    Flags an asset that keeps generating the same category of alert
+    while no closure on any of those alerts shows evidence of actual
+    remediation — the official PS use case "repeated alerts on the
+    same asset without evidence of root-cause remediation".
+
+    Grain is (soc_id, asset_id, category): one finding per recurring
+    pattern, not one per alert. The supervisory concern is the pattern
+    itself — each individual alert may have been handled correctly
+    while the underlying cause was never fixed.
+
+    Remediation evidence is read from `cases.resolution_reason`, the
+    only field in a standard submission that records WHAT was done.
+    The actions table is not usable for this: it records that an
+    analyst acted (on the current dataset every action is `TRIAGE`),
+    which says nothing about whether a root cause was addressed.
+
+    Absence of a remediation keyword is deliberately reported as
+    absence of *evidence*, not as proof that no remediation happened —
+    the remediation may simply have been recorded somewhere this
+    submission does not include.
+    """
+    min_occurrences = cfg["execution_gaps"].get("repeated_alert_min_occurrences", 3)
+    keywords = [k.lower() for k in cfg["execution_gaps"].get(
+        "repeated_alert_remediation_keywords",
+        ["remediated", "contained", "blocked", "patched", "isolated", "quarantined"],
+    )]
+
+    if "asset_id" not in alerts_enriched.columns:
+        return pd.DataFrame()
+
+    df = alerts_enriched[alerts_enriched["asset_id"].notna()].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    # Attach each alert's case resolution text, where a case exists.
+    if cases is not None and not cases.empty and "resolution_reason" in cases.columns \
+            and "alert_id" in cases.columns:
+        resolutions = (cases[["alert_id", "resolution_reason"]]
+                       .dropna(subset=["alert_id"])
+                       .drop_duplicates(subset=["alert_id"]))
+        df = df.merge(resolutions, on="alert_id", how="left")
+    else:
+        df["resolution_reason"] = None
+
+    df["_remediated"] = (
+        df["resolution_reason"].fillna("").astype(str).str.lower()
+        .apply(lambda text: any(keyword in text for keyword in keywords))
+    )
+
+    severity_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+
+    findings = []
+    for (soc_id, asset_id, category), group in df.groupby(
+        ["soc_id", "asset_id", "category"], dropna=True
+    ):
+        if len(group) < min_occurrences:
+            continue
+        if group["_remediated"].any():
+            continue  # at least one closure documents remediation
+
+        severities = [s for s in group["severity"].dropna().unique()]
+        worst = max(severities, key=lambda s: severity_order.get(str(s).upper(), -1)) \
+            if severities else None
+
+        alert_ids = [a for a in group["alert_id"].dropna().tolist()]
+        reasons = sorted({str(r) for r in group["resolution_reason"].dropna().unique()})
+
+        findings.append({
+            "alert_id": pd.NA,
+            "case_id": pd.NA,
+            "soc_id": soc_id,
+            "assigned_analyst_id": pd.NA,
+            "severity": worst,
+            "finding_type": "REPEATED_ALERT_WITHOUT_REMEDIATION",
+            "rule_id": "ROOT-CAUSE-RECURRENCE-001",
+            "rationale": (
+                f"Asset {asset_id} generated {len(group)} separate {category} "
+                f"alerts during the assessment period, and none of the "
+                f"associated case closures record remediation or containment. "
+                f"This may indicate the underlying cause was never addressed, "
+                f"with each recurrence handled as a fresh alert. Absence of a "
+                f"remediation record is not proof that no remediation occurred."
+            ),
+            "evidence": {
+                "asset_id": asset_id,
+                "category": category,
+                "alert_count": int(len(group)),
+                "min_occurrences_threshold": min_occurrences,
+                "highest_severity_observed": worst,
+                "distinct_resolution_reasons": reasons,
+                "remediation_keywords_searched": keywords,
+                "alert_ids": alert_ids[:20],
+            },
+        })
+
+    return pd.DataFrame(findings)
+
+
 def run_all_execution_gap_detectors(alerts_enriched: pd.DataFrame, cases: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     frames = [
         detect_missed_escalations(alerts_enriched),
@@ -258,6 +419,8 @@ def run_all_execution_gap_detectors(alerts_enriched: pd.DataFrame, cases: pd.Dat
         detect_reopened_cases(alerts_enriched),
         detect_repetitive_investigations(cases, cfg),
         detect_analyst_overload(alerts_enriched, cfg),
+        detect_ack_without_investigation(alerts_enriched, cfg),
+        detect_repeated_alerts_without_remediation(alerts_enriched, cases, cfg),
     ]
     frames = [f for f in frames if not f.empty]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

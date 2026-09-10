@@ -39,6 +39,27 @@ execution_gaps:
   # ANALYST_OVERLOAD fires
   analyst_overload_zscore_threshold: 2.0
 
+  # ACK_WITHOUT_INVESTIGATION — severities for which closing an alert
+  # with no INVESTIGATION_STARTED event ever recorded is a gap.
+  # Deliberately NOT all severities: triaging a LOW alert to closure
+  # without opening a formal investigation is normal SOC practice, and
+  # flagging it would bury the cases that matter. Widen only if the
+  # entity's own policy requires an investigation record at that tier.
+  ack_without_investigation_severities: ["HIGH", "CRITICAL"]
+
+  # REPEATED_ALERT_WITHOUT_REMEDIATION — how many alerts of the same
+  # category must recur on one asset before absence of remediation
+  # evidence is treated as a root-cause concern.
+  repeated_alert_min_occurrences: 3
+  # Case resolution_reason text matching any of these (case-insensitive
+  # substring) counts as evidence that remediation actually occurred.
+  # Matched against resolution_reason because that is the only field in
+  # the standard submission that records WHAT was done; the actions
+  # table records that an analyst acted, not that the root cause was
+  # fixed.
+  repeated_alert_remediation_keywords:
+    ["remediated", "contained", "blocked", "patched", "isolated", "quarantined"]
+
 negative_space:
   # Telemetry coverage below this percentage is a coverage gap
   min_expected_coverage_pct: 70
@@ -48,6 +69,21 @@ negative_space:
   # Category present for >= this fraction of peers but absent for an
   # entity is flagged as a missing alert category
   missing_category_peer_presence_fraction: 0.6
+  # MISSING_ESCALATION_RECORDS — fraction of an entity's HIGH/CRITICAL
+  # alerts that must carry SOME escalation record (initiated or not)
+  # before record-keeping is considered adequate. Below this, the
+  # entity does not appear to keep escalation records reliably.
+  #
+  # This replaces an earlier all-or-nothing test that only fired when
+  # an entity had literally zero escalation rows. Real poor
+  # record-keeping is sparse, not absent — an entity logging 6% of the
+  # escalations it should has a record-keeping gap that the old rule
+  # scored identically to a perfectly compliant one.
+  escalation_record_coverage_fraction: 0.5
+  # Minimum HIGH/CRITICAL alerts before the coverage test is applied,
+  # so a handful of alerts cannot produce a coverage "finding".
+  escalation_record_min_high_crit_alerts: 10
+
   # A SOC needs at least this many cases before MISSING_INVESTIGATIONS
   # is evaluated (avoids false positives on tiny/new entities)
   missing_investigation_min_cases: 5
@@ -74,10 +110,22 @@ scoring:
     reopened_case: 1.0
     telemetry_gap: 3.0
     low_activity_outlier: 2.0
-    missing_category: 1.5
+    # Key must equal finding_type.lower(): the detector emits
+    # MISSING_ALERT_CATEGORY, so this was previously unmatched and
+    # the rule silently scored 0. tests/test_detectors.py asserts
+    # every emitted finding_type has a weight here.
+    missing_alert_category: 1.5
     analyst_overload: 1.5
     missing_escalation_records: 2.5
     missing_investigations: 2.0
+    # Closing a HIGH/CRITICAL alert with no investigation record at all
+    # is weighted above fast_closure (2.0): a fast closure at least has
+    # an investigation to inspect, this one has none.
+    ack_without_investigation: 2.5
+    # Same asset alerting repeatedly with no remediation evidence —
+    # weighted with repetitive_investigation, both being root-cause
+    # /depth-of-work concerns rather than single-alert failures.
+    repeated_alert_without_remediation: 2.0
   # Normalize indicator counts per 100 alerts/cases before weighting,
   # so larger entities aren't penalized purely for higher volume.
   normalize_per: 100
@@ -94,14 +142,63 @@ review_queue:
     LOW: 0.5
 
 llm_narration:
-  # Offline explanation layer (see analytics/llm_narration.py). Narrates
-  # findings that are already decided — never used to decide a finding.
-  enabled: true
-  provider: "ollama"
+  # Offline explanation layer. Narrates findings that are ALREADY
+  # decided — never used to decide one. Disable it entirely and the
+  # assessment output is identical in substance.
+  #
+  # Default OFF. The deterministic assessment is the product; the
+  # explanation layer is an optional aid that must never be a
+  # precondition for running one.
+  enabled: false
+
+  # mock     - built-in deterministic sample explainer, no model (tests/demo)
+  # llamacpp - SHIPPED path: a local .gguf file, no service to install
+  # ollama   - development convenience on a workstation with Ollama
+  #
+  # Override for a single run with SATSA_NARRATION_BACKEND=mock, which
+  # is what the test suite and UI smoke tests use so that no automated
+  # run can ever spin up a multi-gigabyte model.
+  backend: "mock"
+
+  # --- llamacpp (shipped) ---
+  # Absolute path to the GGUF model file. In an air-gapped deployment
+  # this file arrives on the same media as the dataset; updating the
+  # model means replacing this file and restarting. Empty = no local
+  # model configured, and the UI reports "AI unavailable".
+  model_path: ""
+  context_size: 4096
+  max_tokens: 320
+  # 0 = let llama.cpp choose based on the host CPU
+  threads: 0
+
+  # --- ollama (development) ---
   base_url: "http://localhost:11434"
-  model: "qwen2.5:14b"
-  # 180s, not 30s: on CPU-only hardware a single 14B-model call can
-  # take a few minutes. A tight timeout here silently falls back to
-  # the rule rationale instead of erroring, so a too-short value
-  # quietly discards every narration without telling you.
+
+  # Model identifier. qwen2.5:7b is the balanced default.
+  # NOT qwen2.5:14b: at ~9 GB resident it is unusable on the 8th-gen
+  # i5 / 20 GB development hardware, and a default that hangs the
+  # machine it ships on is not a default.
+  model: "qwen2.5:7b"
+
+  temperature: 0.1
+  # Generation budget. CPU inference of a 7B model runs 1-4 minutes per
+  # call; a short timeout here does not make narration faster, it just
+  # discards slow-but-valid answers and silently falls back.
   timeout_seconds: 180
+  # Availability probe budget — deliberately tiny and separate. A dead
+  # backend must report itself dead in about a second, not in three
+  # minutes with the UI blocked behind it.
+  availability_timeout_seconds: 3
+
+  # --- scope: what actually gets explained ---
+  # The current dataset yields ~1,480 findings. Explaining all of them
+  # is hours of CPU for output nobody reads, so narration follows the
+  # review queue's existing supervisory ranking and stops at a limit.
+  # Note that severity_scope alone bounds almost nothing: the queue is
+  # already ~100% CRITICAL/HIGH by construction. max_explanations is
+  # the lever that actually keeps a run finite.
+  max_explanations: 10
+  # critical | critical_high | critical_high_medium | all
+  severity_scope: "critical_high"
+  # Only explain queue items at or above this rank; null = no limit.
+  max_queue_rank: null

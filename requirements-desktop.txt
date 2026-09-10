@@ -1,0 +1,4 @@
+# SAT-SA — the desktop product (application/, launched via desktop.py).
+# This is what the shipped application is built from.
+-r requirements.txt
+PySide6

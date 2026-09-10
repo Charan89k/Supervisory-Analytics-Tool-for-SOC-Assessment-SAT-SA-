@@ -57,6 +57,16 @@ RESOLUTION_REASONS = [
     "Benign - authorized activity",
 ]
 
+# Closure reasons that record NO remediation or containment. Used to
+# seed the recurring-asset ground truth: an asset that keeps alerting
+# while every closure says "benign" or "duplicate" is the shape
+# REPEATED_ALERT_WITHOUT_REMEDIATION is meant to catch.
+NON_REMEDIATION_REASONS = [
+    "False positive - benign activity",
+    "Duplicate of existing case",
+    "Benign - authorized activity",
+]
+
 TEMPLATED_NOTES = [
     "Reviewed and closed.", "Investigated, no further action required.",
     "Alert reviewed per SOP, closed as benign.",
@@ -66,27 +76,46 @@ RISK_PROFILES = {
     # (slow_triage_rate, fast_closure_rate, missing_evidence_rate,
     #  reopen_rate, missed_escalation_rate, template_note_rate,
     #  overload_skew, telemetry_health_rate, alert_volume_multiplier,
-    #  escalation_recordkeeping_rate, investigation_note_rate)
+    #  escalation_recordkeeping_rate, investigation_note_rate,
+    #  rubber_stamp_rate, recurring_unremediated_rate, missing_categories)
+    #
+    # rubber_stamp        - fraction of CLOSED alerts that go straight
+    #                       from ACKNOWLEDGED to CLOSED with no
+    #                       INVESTIGATION_STARTED event ever recorded
+    #                       (feeds ACK_WITHOUT_INVESTIGATION)
+    # recurring_unremediated - fraction of alerts redirected onto a small
+    #                       pool of persistent "problem assets" whose
+    #                       closures never record remediation
+    #                       (feeds REPEATED_ALERT_WITHOUT_REMEDIATION)
+    # missing_categories  - how many alert categories this entity never
+    #                       produces at all, modelling an entity with no
+    #                       tooling for that class of threat
+    #                       (feeds MISSING_ALERT_CATEGORY)
     "clean": dict(slow_triage=0.03, fast_closure=0.02, missing_evidence=0.03,
                   reopen=0.02, missed_escalation=0.02, template_notes=0.05,
                   overload_skew=1.0, telemetry_health=0.97, volume_mult=1.0,
-                  escalation_records=0.98, investigation_notes=0.97),
+                  escalation_records=0.98, investigation_notes=0.97,
+                  rubber_stamp=0.00, recurring_unremediated=0.00, missing_categories=0),
     "typical": dict(slow_triage=0.12, fast_closure=0.08, missing_evidence=0.12,
                      reopen=0.08, missed_escalation=0.10, template_notes=0.15,
                      overload_skew=1.4, telemetry_health=0.85, volume_mult=1.0,
-                     escalation_records=0.90, investigation_notes=0.85),
+                     escalation_records=0.90, investigation_notes=0.85,
+                  rubber_stamp=0.03, recurring_unremediated=0.02, missing_categories=0),
     "weak": dict(slow_triage=0.35, fast_closure=0.28, missing_evidence=0.30,
                  reopen=0.22, missed_escalation=0.30, template_notes=0.35,
                  overload_skew=3.0, telemetry_health=0.55, volume_mult=1.0,
-                 escalation_records=0.75, investigation_notes=0.60),
+                 escalation_records=0.75, investigation_notes=0.60,
+                  rubber_stamp=0.14, recurring_unremediated=0.07, missing_categories=0),
     "low_activity": dict(slow_triage=0.10, fast_closure=0.08, missing_evidence=0.10,
                           reopen=0.06, missed_escalation=0.08, template_notes=0.12,
                           overload_skew=1.2, telemetry_health=0.80, volume_mult=0.12,
-                          escalation_records=0.88, investigation_notes=0.85),
+                          escalation_records=0.88, investigation_notes=0.85,
+                  rubber_stamp=0.04, recurring_unremediated=0.02, missing_categories=3),
     "poor_recordkeeping": dict(slow_triage=0.15, fast_closure=0.10, missing_evidence=0.20,
                                 reopen=0.10, missed_escalation=0.15, template_notes=0.20,
                                 overload_skew=1.5, telemetry_health=0.80, volume_mult=1.0,
-                                escalation_records=0.15, investigation_notes=0.20),
+                                escalation_records=0.15, investigation_notes=0.20,
+                  rubber_stamp=0.09, recurring_unremediated=0.04, missing_categories=0),
 }
 
 PROFILE_ORDER = ["clean", "typical", "weak", "low_activity", "poor_recordkeeping"]
@@ -160,6 +189,25 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int) -> dict:
 
         n_alerts = max(5, int(alerts_per_soc * cfg["volume_mult"]))
 
+        # An entity with no tooling for a class of threat never
+        # produces that alert category at all. Modelled explicitly
+        # rather than left to chance, so MISSING_ALERT_CATEGORY has
+        # deterministic ground truth to detect.
+        n_missing_categories = cfg.get("missing_categories", 0)
+        soc_categories = list(CATEGORIES)
+        omitted_categories = []
+        if n_missing_categories:
+            omitted_categories = random.sample(CATEGORIES, n_missing_categories)
+            soc_categories = [c for c in CATEGORIES if c not in omitted_categories]
+
+        # A small pool of assets that keep alerting without ever being
+        # remediated. Each is pinned to one category so the recurrence
+        # is a coherent repeated problem rather than noise.
+        problem_assets = [
+            (f"ASSET-{random.randint(1, 500):04d}", random.choice(soc_categories))
+            for _ in range(3)
+        ] if cfg.get("recurring_unremediated", 0) > 0 else []
+
         for a_idx in range(n_alerts):
             alert_id = f"ALT-{soc_id}-{a_idx+1:06d}"
             created = period_start + timedelta(
@@ -167,7 +215,17 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int) -> dict:
             )
             severity = random.choices(SEVERITIES, weights=SEVERITY_WEIGHTS, k=1)[0]
             assigned_analyst = random.choices(soc_analyst_ids, weights=weights, k=1)[0]
-            category = random.choice(CATEGORIES)
+
+            is_recurring_unremediated = (
+                bool(problem_assets)
+                and random.random() < cfg.get("recurring_unremediated", 0)
+            )
+            if is_recurring_unremediated:
+                asset_id, category = random.choice(problem_assets)
+            else:
+                asset_id = f"ASSET-{random.randint(1, 500):04d}"
+                category = random.choice(soc_categories)
+
             mitre = random.choice(MITRE)
             status = random.choices(
                 ["CLOSED", "OPEN", "IN_PROGRESS"], weights=[0.85, 0.05, 0.10], k=1
@@ -179,7 +237,7 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int) -> dict:
                 "source": random.choice(SOURCES), "source_system": f"{random.choice(SOURCES)}-01",
                 "alert_type": category, "category": category, "severity": severity,
                 "risk_score": round(random.uniform(1, 100), 1),
-                "asset_id": f"ASSET-{random.randint(1, 500):04d}",
+                "asset_id": asset_id,
                 "user_id": f"USER-{random.randint(1, 2000):05d}",
                 "source_ip": f"10.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}",
                 "destination_ip": f"172.{random.randint(16,31)}.{random.randint(0,255)}.{random.randint(1,254)}",
@@ -212,11 +270,20 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int) -> dict:
                 duration = random.uniform(triage_sla * 0.3, triage_sla * 1.5)
             closed = invest_start + timedelta(minutes=duration)
 
+            # Rubber-stamp closure: acknowledged, then closed, with no
+            # INVESTIGATION_STARTED event in between. The alert still
+            # closes on time, so it looks clean in any KPI report — the
+            # gap is only visible in the lifecycle trail itself.
+            is_rubber_stamp = (
+                status == "CLOSED" and random.random() < cfg.get("rubber_stamp", 0)
+            )
+
             if status == "CLOSED":
-                alert_events.append({"event_id": f"EVT-{alert_id}-3", "alert_id": alert_id,
-                                      "event_type": "INVESTIGATION_STARTED", "timestamp": invest_start.isoformat(),
-                                      "actor_id": assigned_analyst, "previous_status": "IN_PROGRESS",
-                                      "new_status": "IN_PROGRESS"})
+                if not is_rubber_stamp:
+                    alert_events.append({"event_id": f"EVT-{alert_id}-3", "alert_id": alert_id,
+                                          "event_type": "INVESTIGATION_STARTED", "timestamp": invest_start.isoformat(),
+                                          "actor_id": assigned_analyst, "previous_status": "IN_PROGRESS",
+                                          "new_status": "IN_PROGRESS"})
                 alert_events.append({"event_id": f"EVT-{alert_id}-4", "alert_id": alert_id,
                                       "event_type": "CLOSED", "timestamp": closed.isoformat(),
                                       "actor_id": assigned_analyst, "previous_status": "IN_PROGRESS",
@@ -244,7 +311,12 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int) -> dict:
                 "alert_id": alert_id, "created_at": created.isoformat(),
                 "assigned_analyst_id": assigned_analyst, "severity": severity,
                 "status": status, "resolution": "CLOSED" if status == "CLOSED" else "OPEN",
-                "resolution_reason": random.choice(RESOLUTION_REASONS) if status == "CLOSED" else None,
+                "resolution_reason": (
+                    (random.choice(NON_REMEDIATION_REASONS)
+                     if is_recurring_unremediated
+                     else random.choice(RESOLUTION_REASONS))
+                    if status == "CLOSED" else None
+                ),
                 "investigation_notes": note,
                 "closed_at": closed.isoformat() if status == "CLOSED" else None,
             })

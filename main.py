@@ -18,7 +18,7 @@ import pandas as pd
 import numpy as np
 
 from analytics.loader import load_soc_dataset
-from analytics.validator import validate_dataset
+from analytics.validator import validate_dataset, DatasetValidationError
 from analytics.normalizer import normalize_dataset, build_alerts_enriched
 from analytics.metrics.alert_metrics import (
     alert_volume_by_soc, severity_mix_by_soc, true_positive_rate_by_soc, category_coverage_by_soc,
@@ -34,6 +34,7 @@ from analytics.scoring.benchmark import add_peer_group, percentile_rank_by_peer_
 from analytics.scoring.score import build_finding_counts, compute_entity_risk_scores, score_breakdown_for_entity
 from analytics.review_queue import build_review_queue
 from analytics.llm_narration import narrate_queue
+from analytics.narration import resolve_backend_name
 from analytics.reporting import write_csv_exports, write_pdf_report
 
 
@@ -50,8 +51,29 @@ def df_records(df: pd.DataFrame) -> list:
     return clean.to_dict(orient="records")
 
 
-def run_pipeline(data_path: str, out_path: str, config_path: str,
-                  export_csv: bool = False, export_pdf: bool = False, narrate: bool = False):
+def validate_dataset_at(data_path: str):
+    """
+    Load and validate a dataset WITHOUT running any analytics.
+
+    This is the "AUTOMATIC DATA VALIDATION -> SHOW VALIDATION RESULT"
+    step the supervisory workflow requires before an assessment starts.
+    Returns the ValidationReport; never raises on validation content
+    (only on an unreadable dataset), so the caller decides what to do
+    with errors.
+    """
+    data = load_soc_dataset(data_path)
+    return validate_dataset(data)
+
+
+def run_pipeline(
+    data_path: str,
+    out_path: str,
+    config_path: str,
+    export_csv: bool = False,
+    export_pdf: bool = False,
+    narrate: bool = False,
+    progress_callback=None,
+):
     cfg = load_config(config_path)
     steps_completed = []
 
@@ -59,16 +81,22 @@ def run_pipeline(data_path: str, out_path: str, config_path: str,
         print(f"✓ {label}")
         steps_completed.append(label)
 
+        if progress_callback:
+            progress_callback(label)
+
     # ---- Load ----
     data = load_soc_dataset(data_path)
     done("Dataset loaded")
 
     # ---- Validate ----
+    # A dataset that fails ERROR-level validation raises rather than
+    # returning None. The old `return` left every caller unable to tell
+    # "validation rejected this" from "the run produced nothing", and
+    # the desktop UI surfaced it as an opaque RuntimeError with the
+    # actual reasons stranded in stdout.
     validation_report = validate_dataset(data)
     if validation_report.has_errors:
-        print(validation_report.summary())
-        print("\n✗ Dataset validation FAILED — fix the errors above before proceeding.")
-        return
+        raise DatasetValidationError(validation_report, data_path)
     done("Dataset validated")
 
     # ---- Normalize ----
@@ -123,8 +151,15 @@ def run_pipeline(data_path: str, out_path: str, config_path: str,
     review_queue_records = df_records(review_queue)
     if narrate:
         cfg.setdefault("llm_narration", {})["enabled"] = True
+        backend_name = resolve_backend_name(cfg)
         review_queue_records = narrate_queue(review_queue_records, cfg)
-        done("Review queue narrated (offline Qwen)")
+        explained = sum(1 for r in review_queue_records
+                        if r.get("narration_source") not in (None, "rule"))
+        # Report the backend that actually ran. Saying "offline Qwen"
+        # when the deterministic sample explainer produced the text
+        # would misstate how a supervisory explanation was generated.
+        done(f"Review queue narrated via '{backend_name}' "
+             f"({explained} of {len(review_queue_records)} items explained)")
     done("Supervisory review queue built")
     print()
 
@@ -174,13 +209,7 @@ def run_pipeline(data_path: str, out_path: str, config_path: str,
             "total_findings": int(total_findings),
             "pipeline_steps_completed": steps_completed,
         },
-        "validation_report": {
-            "issue_count": len(validation_report.issues),
-            "issues": [
-                {"table": i.table, "severity": i.severity, "message": i.message, "row_count": i.row_count}
-                for i in validation_report.issues
-            ],
-        },
+        "validation_report": validation_report.to_dict(),
         "entities": sorted(entity_assessments, key=lambda e: e["priority_rank"]),
         "review_queue": review_queue_records,
     }
@@ -205,6 +234,8 @@ def run_pipeline(data_path: str, out_path: str, config_path: str,
         done("PDF executive summary written")
         print(f"  {pdf_file}")
 
+    return assessment_results
+
 
 def main():
     parser = argparse.ArgumentParser(description="SAT-SA Analytics Engine v0.1")
@@ -218,8 +249,13 @@ def main():
                               "(requires llm_narration.enabled: true in config and a running Ollama instance)")
     args = parser.parse_args()
 
-    run_pipeline(args.data, args.out, args.config,
-                 export_csv=args.export_csv, export_pdf=args.export_pdf, narrate=args.narrate)
+    try:
+        run_pipeline(args.data, args.out, args.config,
+                     export_csv=args.export_csv, export_pdf=args.export_pdf,
+                     narrate=args.narrate)
+    except DatasetValidationError as exc:
+        print(exc.message())
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

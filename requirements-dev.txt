@@ -1,0 +1,8 @@
+# SAT-SA — development and packaging.
+# Adds the test suite, the packaging toolchain, and the legacy
+# Streamlit reference dashboard (app.py, NOT the product).
+-r requirements-desktop.txt
+pytest
+pyinstaller
+streamlit
+plotly
