@@ -220,6 +220,72 @@ def main():
     ok("all three charts rendered with data")
     assert window.finding_table.rowCount() > 0
     ok(f"findings explorer shows {window.finding_table.rowCount()} rows")
+
+    print("\n[5c] Findings explorer: search, filters, sorting")
+    from PySide6.QtCore import Qt as _Qt
+    total = window.finding_table.rowCount()
+
+    window.finding_severity_filter.setCurrentText("CRITICAL")
+    critical = window.finding_table.rowCount()
+    assert 0 < critical < total
+    ok(f"severity filter: {total} -> {critical}")
+
+    window.finding_category_filter.setCurrentText("Negative Space")
+    assert window.finding_table.rowCount() <= critical
+    window.clear_finding_filters()
+    assert window.finding_table.rowCount() == total
+    ok("category filter composes with severity; Clear restores all rows")
+
+    window.finding_search.setText("ROOT-CAUSE-RECURRENCE")
+    searched = window.finding_table.rowCount()
+    assert 0 < searched < total
+    ok(f"search by rule id: {total} -> {searched}")
+    window.clear_finding_filters()
+
+    window.finding_soc_filter.setCurrentText("SOC-003")
+    assert 0 < window.finding_table.rowCount() < total
+    ok(f"entity filter -> {window.finding_table.rowCount()} rows")
+    window.clear_finding_filters()
+
+    window.finding_sort.setCurrentIndex(0)
+    first = window.finding_table.item(0, 0).data(_Qt.UserRole)
+    assert window.finding_severity(first) == "CRITICAL"
+    ok("sorting by severity puts CRITICAL first")
+
+    print("\n[5d] Audit chain: Finding -> Rule -> Rationale -> Evidence")
+    window.finding_table.selectRow(0)
+    detail = window.finding_detail.toPlainText()
+    for section in ("FINDING", "RULE \u2014", "RATIONALE (deterministic)",
+                     "EVIDENCE (deterministic)"):
+        assert section in detail, section
+    ok("all four deterministic sections present, in order")
+
+    assert "Configured thresholds used by this rule" in detail
+    ok("rule section names the thresholds the run actually used")
+
+    selected = window.current_finding
+    assert selected["rationale"] in detail, "rationale was not shown verbatim"
+    ok("rationale rendered verbatim, not rephrased")
+
+    print("\n[5e] Source records drill-down")
+    window.load_source_records()
+    source = window.source_detail.toPlainText()
+    assert "SOURCE RECORDS" in source
+    assert "grain)" in source
+    assert selected.get("alert_id", "") in source or "entity" in source.lower()
+    ok(f"source records loaded ({len(source):,} chars) from the submission")
+
+    print("\n[5f] Source unavailable is reported, not shown as empty")
+    saved_path = window.session.dataset_path
+    window.evidence_service.reset()
+    window.session.set_dataset("/no/such/submission", "gone")
+    window.load_source_records()
+    unavailable = window.source_detail.toPlainText()
+    assert "SOURCE RECORDS UNAVAILABLE" in unavailable
+    assert "does not mean the finding lacks evidence" in unavailable
+    ok("a moved submission reports itself rather than reading as no evidence")
+    window.session.set_dataset(saved_path, "synthetic")
+    window.evidence_service.reset()
     assert window.review_table.rowCount() > 0
     ok(f"review queue shows {window.review_table.rowCount()} rows")
     assert "report" in window.report_status.text()
@@ -346,13 +412,55 @@ def main():
         assert record["evidence"] is not None
     ok("entity ranking, findings, severities and evidence all intact")
 
-    print("\n[13] Explanation surfaces in the detail panel, labelled")
+    print("\n[13] Explanation surfaces, labelled and structurally separate")
     window.review_table.selectRow(0)
     detail = window.review_detail.toPlainText()
-    assert "SAMPLE EXPLANATION (NO MODEL)" in detail, detail[:200]
-    assert "no language model" in detail.lower()
+    assert "SAMPLE EXPLANATION" in detail, detail[:200]
     assert "authoritative record" in detail
-    ok("detail panel shows the sample label and the authoritative-record note")
+    ok("review queue detail carries the sample label and the caveat")
+
+    # The invariant this phase turns on: narration text must never be
+    # able to reach the authoritative panel. Separate widgets make it
+    # structurally impossible, and this asserts it on real data.
+    from PySide6.QtCore import Qt as _Qt2
+    window.show_page(2)
+    window.clear_finding_filters()
+    explained_row = None
+    for row in range(window.finding_table.rowCount()):
+        candidate = window.finding_table.item(row, 0).data(_Qt2.UserRole)
+        if window.narration_for(candidate):
+            explained_row = row
+            break
+    assert explained_row is not None, "no explained finding reached the explorer"
+
+    window.finding_table.selectRow(explained_row)
+    assert not window.ai_explanation_panel.isHidden()
+    assert "SAMPLE EXPLANATION" in window.ai_explanation_header.text()
+    ok(f"explained finding shows the AI panel: "
+       f"{window.ai_explanation_header.text()!r}")
+
+    narration = window.ai_explanation_text.toPlainText()
+    authoritative = window.finding_detail.toPlainText()
+    assert narration, "AI panel is empty"
+    assert narration not in authoritative
+    assert "[SAMPLE EXPLANATION]" not in authoritative
+    ok("narration text is absent from the authoritative detail panel")
+
+    finding = window.current_finding
+    assert finding["rationale"] in authoritative
+    assert json.dumps(finding["evidence"], indent=2, default=str) in authoritative
+    ok("deterministic rationale and evidence remain visible alongside it")
+
+    # A finding with no explanation must not show the panel at all.
+    unexplained = None
+    for row in range(window.finding_table.rowCount()):
+        candidate = window.finding_table.item(row, 0).data(_Qt2.UserRole)
+        if not window.narration_for(candidate):
+            unexplained = row
+            break
+    window.finding_table.selectRow(unexplained)
+    assert window.ai_explanation_panel.isHidden()
+    ok("unexplained finding shows no AI panel at all")
 
     print("\n[14] Cancellation")
     from application.narration_worker import NarrationWorker

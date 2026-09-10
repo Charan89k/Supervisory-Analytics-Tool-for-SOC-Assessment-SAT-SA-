@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -36,7 +37,11 @@ from PySide6.QtWidgets import (
 
 from analytics.narration.base import STATE_DISABLED, BackendStatus
 from analytics.ingestion import describe_supported_inputs
-from application.services import dashboard_service
+from application.services import dashboard_service, rule_reference
+from application.services.evidence_service import (
+    EvidenceService,
+    SourceUnavailable,
+)
 from application.session import Phase, SessionState
 from application.version import (
     APP_FULL_NAME,
@@ -103,6 +108,12 @@ class MainWindow(QMainWindow):
         self.validation_worker = None
         self.validation_busy = False
         self.current_validation_report = None
+
+        self.current_finding = None
+        self._assessment_config = None
+        # Re-reads the submission on demand for source-record drill-down.
+        # Cached for the session; reset when a new assessment runs.
+        self.evidence_service = EvidenceService()
 
         self.narration_thread = None
         self.narration_worker = None
@@ -1103,6 +1114,11 @@ class MainWindow(QMainWindow):
             "✓ Assessment completed successfully."
         )
 
+        # A new assessment may come from a different submission, so the
+        # cached source data must not be reused across runs.
+        self.evidence_service.reset()
+        self.current_finding = None
+
         # Process all generated data
         self.prepare_result_data()
 
@@ -1405,31 +1421,38 @@ class MainWindow(QMainWindow):
     # ============================================================
 
     def build_findings_page(self):
-        page = QWidget()
+        """
+        The Findings explorer.
 
+        Laid out so the audit chain is readable top to bottom in one
+        panel — Finding, Rule, Rationale, Evidence, Source records — with
+        no step hidden behind a tab.
+
+        The AI explanation lives in its OWN widget below the
+        deterministic detail, never inside it. That is structural, not
+        cosmetic: with separate widgets there is no code path by which
+        narration text can be written into the authoritative panel.
+        """
+        page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(
-            30,
-            25,
-            30,
-            25,
-        )
+        layout.setContentsMargins(30, 25, 30, 25)
 
         title = QLabel("Findings")
         title.setObjectName("page_title")
-
         layout.addWidget(title)
 
         description = QLabel(
-            "Evidence-backed execution gaps and negative-space findings."
+            "Evidence-backed execution gaps and negative-space findings. "
+            "Every finding traces to the rule that produced it, the "
+            "evidence that rule read, and the submitted records behind "
+            "that evidence."
         )
-        description.setObjectName(
-            "page_description"
-        )
-
+        description.setObjectName("page_description")
+        description.setWordWrap(True)
         layout.addWidget(description)
 
         page_layout = layout
+
         self.findings_placeholder = QLabel("")
         self.findings_placeholder.setObjectName("empty_state")
         self.findings_placeholder.setAlignment(Qt.AlignCenter)
@@ -1441,310 +1464,478 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         page_layout.addWidget(self.findings_content, 1)
 
-        # Filters
-        filters = QHBoxLayout()
+        # ---- Search + filters --------------------------------------
+        search_row = QHBoxLayout()
+        self.finding_search = QLineEdit()
+        self.finding_search.setPlaceholderText(
+            "Search rule, finding type, alert, case, analyst, entity, "
+            "or rationale text…")
+        self.finding_search.setClearButtonEnabled(True)
+        self.finding_search.textChanged.connect(self.refresh_findings)
+        search_row.addWidget(self.finding_search, 1)
 
-        self.finding_type_filter = QComboBox()
-        self.finding_type_filter.addItems(
-            [
-                "All Findings",
-                "Execution Gap",
-                "Negative Space",
-            ]
-        )
+        self.finding_count_label = QLabel("")
+        self.finding_count_label.setObjectName("caveat")
+        # Fixed vertically: a Preferred-height QLabel leaves the row's
+        # maximum height unbounded, and QVBoxLayout then hands the row
+        # every spare pixel — the search box ended up centred in a
+        # 400px band.
+        self.finding_count_label.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Fixed)
+        search_row.addWidget(self.finding_count_label)
+        layout.addLayout(search_row)
+
+        filters = QHBoxLayout()
+        filters.setSpacing(8)
+
+        self.finding_category_filter = QComboBox()
+        self.finding_category_filter.addItems(
+            ["All Categories", "Execution Gap", "Negative Space"])
 
         self.finding_soc_filter = QComboBox()
-        self.finding_soc_filter.addItem(
-            "All SOCs"
-        )
+        self.finding_soc_filter.addItem("All Entities")
 
         self.finding_severity_filter = QComboBox()
         self.finding_severity_filter.addItems(
-            [
-                "All Severities",
-                "CRITICAL",
-                "HIGH",
-                "MEDIUM",
-                "LOW",
-            ]
-        )
+            ["All Severities", "CRITICAL", "HIGH", "MEDIUM", "LOW", "UNRATED"])
 
-        filters.addWidget(
-            self.finding_type_filter
-        )
-        filters.addWidget(
-            self.finding_soc_filter
-        )
-        filters.addWidget(
-            self.finding_severity_filter
-        )
+        self.finding_type_filter = QComboBox()
+        self.finding_type_filter.addItem("All Finding Types")
+
+        self.finding_rule_filter = QComboBox()
+        self.finding_rule_filter.addItem("All Rules")
+
+        self.finding_sort = QComboBox()
+        self.finding_sort.addItems([
+            "Sort: Severity (worst first)",
+            "Sort: Entity",
+            "Sort: Finding type",
+            "Sort: Rule ID",
+        ])
+
+        for widget, label in (
+            (self.finding_category_filter, "Category"),
+            (self.finding_soc_filter, "Entity"),
+            (self.finding_severity_filter, "Severity"),
+            (self.finding_type_filter, "Type"),
+            (self.finding_rule_filter, "Rule"),
+            (self.finding_sort, "Sort"),
+        ):
+            widget.setMinimumWidth(150)
+            widget.currentIndexChanged.connect(self.refresh_findings)
+            filters.addWidget(widget)
+
+        self.clear_filters_button = QPushButton("Clear")
+        self.clear_filters_button.setCursor(Qt.PointingHandCursor)
+        self.clear_filters_button.clicked.connect(self.clear_finding_filters)
+        filters.addWidget(self.clear_filters_button)
         filters.addStretch()
-
         layout.addLayout(filters)
 
-        self.finding_type_filter.currentIndexChanged.connect(
-            self.refresh_findings
-        )
-        self.finding_soc_filter.currentIndexChanged.connect(
-            self.refresh_findings
-        )
-        self.finding_severity_filter.currentIndexChanged.connect(
-            self.refresh_findings
-        )
-
+        # ---- Table + detail ----------------------------------------
         splitter = QSplitter(Qt.Horizontal)
 
-        # Findings list
         self.finding_table = QTableWidget()
         self.finding_table.setColumnCount(7)
-
         self.finding_table.setHorizontalHeaderLabels(
-            [
-                "Severity",
-                "Type",
-                "SOC",
-                "Alert",
-                "Case",
-                "Rule",
-                "Analyst",
-            ]
-        )
+            ["Severity", "Category", "Entity", "Finding Type", "Rule",
+             "Alert", "Analyst"])
+        self.finding_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.finding_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.finding_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.finding_table.verticalHeader().setVisible(False)
+        self.finding_table.itemSelectionChanged.connect(self.finding_selected)
+        splitter.addWidget(self.finding_table)
 
-        self.finding_table.setEditTriggers(
-            QTableWidget.NoEditTriggers
-        )
+        # ---- Detail panel -------------------------------------------
+        detail_scroll = QScrollArea()
+        detail_scroll.setWidgetResizable(True)
+        detail_scroll.setFrameShape(QFrame.NoFrame)
+        detail_host = QWidget()
+        detail_layout = QVBoxLayout(detail_host)
+        detail_layout.setContentsMargins(12, 0, 4, 0)
+        detail_layout.setSpacing(8)
 
-        self.finding_table.setSelectionBehavior(
-            QTableWidget.SelectRows
-        )
+        self.finding_detail_title = QLabel("Select a finding")
+        self.finding_detail_title.setObjectName("detail_title")
+        self.finding_detail_title.setWordWrap(True)
+        detail_layout.addWidget(self.finding_detail_title)
 
-        self.finding_table.itemSelectionChanged.connect(
-            self.finding_selected
-        )
+        self.finding_provenance = QLabel("")
+        self.finding_provenance.setObjectName("caveat")
+        self.finding_provenance.setWordWrap(True)
+        detail_layout.addWidget(self.finding_provenance)
 
-        # Detail panel
-        detail = QFrame()
-        detail.setObjectName(
-            "detail_panel"
-        )
-
-        detail_layout = QVBoxLayout(detail)
-
-        self.finding_detail_title = QLabel(
-            "Select a finding"
-        )
-        self.finding_detail_title.setObjectName(
-            "detail_title"
-        )
-
-        detail_layout.addWidget(
-            self.finding_detail_title
-        )
-
+        # 1-4: Finding, Rule, Rationale, Evidence — all deterministic,
+        # all verbatim from the rule engine.
         self.finding_detail = QTextEdit()
-        self.finding_detail.setReadOnly(
-            True
-        )
+        self.finding_detail.setReadOnly(True)
+        self.finding_detail.setObjectName("deterministic_detail")
+        self.finding_detail.setMinimumHeight(300)
+        detail_layout.addWidget(self.finding_detail)
 
-        detail_layout.addWidget(
-            self.finding_detail
-        )
+        # 5: Source records — read back from the submission on demand.
+        source_header = QHBoxLayout()
+        source_title = QLabel("SOURCE RECORDS")
+        source_title.setObjectName("section_title")
+        source_header.addWidget(source_title)
+        source_header.addStretch()
+        self.source_button = QPushButton("Load source records")
+        self.source_button.setCursor(Qt.PointingHandCursor)
+        self.source_button.clicked.connect(self.load_source_records)
+        source_header.addWidget(self.source_button)
+        detail_layout.addLayout(source_header)
 
-        splitter.addWidget(
-            self.finding_table
-        )
+        self.source_hint = QLabel(
+            "The submitted records this finding was derived from, read "
+            "back from the dataset exactly as supplied.")
+        self.source_hint.setObjectName("caveat")
+        self.source_hint.setWordWrap(True)
+        detail_layout.addWidget(self.source_hint)
 
-        splitter.addWidget(detail)
+        self.source_detail = QTextEdit()
+        self.source_detail.setReadOnly(True)
+        self.source_detail.setObjectName("source_detail")
+        self.source_detail.setMinimumHeight(220)
+        detail_layout.addWidget(self.source_detail)
 
-        splitter.setSizes(
-            [
-                750,
-                500,
-            ]
-        )
+        # 6: AI explanation — a separate widget, deliberately. Narration
+        # text has nowhere to go inside the panels above.
+        self.ai_explanation_panel = QFrame()
+        self.ai_explanation_panel.setObjectName("ai_panel")
+        ai_layout = QVBoxLayout(self.ai_explanation_panel)
 
+        self.ai_explanation_header = QLabel("")
+        self.ai_explanation_header.setObjectName("ai_panel_header")
+        self.ai_explanation_header.setWordWrap(True)
+        ai_layout.addWidget(self.ai_explanation_header)
+
+        self.ai_explanation_text = QTextEdit()
+        self.ai_explanation_text.setReadOnly(True)
+        self.ai_explanation_text.setObjectName("ai_panel_text")
+        self.ai_explanation_text.setMaximumHeight(150)
+        ai_layout.addWidget(self.ai_explanation_text)
+
+        self.ai_explanation_footer = QLabel(
+            "Supplementary only. The rule, rationale and evidence above "
+            "are the authoritative record and were produced without it.")
+        self.ai_explanation_footer.setObjectName("caveat")
+        self.ai_explanation_footer.setWordWrap(True)
+        ai_layout.addWidget(self.ai_explanation_footer)
+
+        self.ai_explanation_panel.hide()
+        detail_layout.addWidget(self.ai_explanation_panel)
+
+        detail_layout.addStretch()
+        detail_scroll.setWidget(detail_host)
+        splitter.addWidget(detail_scroll)
+        splitter.setSizes([700, 640])
         layout.addWidget(splitter)
 
         return page
 
-    def refresh_findings(self):
-        if not hasattr(
-            self,
-            "finding_table",
+    def clear_finding_filters(self):
+        for widget in (self.finding_category_filter, self.finding_soc_filter,
+                        self.finding_severity_filter, self.finding_type_filter,
+                        self.finding_rule_filter):
+            widget.blockSignals(True)
+            widget.setCurrentIndex(0)
+            widget.blockSignals(False)
+        self.finding_search.blockSignals(True)
+        self.finding_search.clear()
+        self.finding_search.blockSignals(False)
+        self.refresh_findings()
+
+    SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3,
+                      "UNRATED": 4}
+
+    @staticmethod
+    def finding_severity(finding) -> str:
+        value = finding.get("severity")
+        if value is None:
+            return "UNRATED"
+        text = str(value).strip().upper()
+        return text if text in MainWindow.SEVERITY_RANK else "UNRATED"
+
+    def _sync_filter_options(self):
+        """Rebuild entity/type/rule choices from the loaded findings."""
+        for widget, key, all_label in (
+            (self.finding_soc_filter, "soc_id", "All Entities"),
+            (self.finding_type_filter, "finding_type", "All Finding Types"),
+            (self.finding_rule_filter, "rule_id", "All Rules"),
         ):
+            current = widget.currentText()
+            values = sorted({str(f.get(key)) for f in self.findings
+                             if f.get(key)})
+            widget.blockSignals(True)
+            widget.clear()
+            widget.addItem(all_label)
+            widget.addItems(values)
+            index = widget.findText(current)
+            widget.setCurrentIndex(index if index >= 0 else 0)
+            widget.blockSignals(False)
+
+    def filtered_findings(self):
+        """
+        Apply search and filters. Pure selection — nothing here alters a
+        finding, only decides whether it is shown.
+        """
+        category = self.finding_category_filter.currentText()
+        soc = self.finding_soc_filter.currentText()
+        severity = self.finding_severity_filter.currentText()
+        finding_type = self.finding_type_filter.currentText()
+        rule = self.finding_rule_filter.currentText()
+        query = self.finding_search.text().strip().lower()
+
+        results = []
+        for finding in self.findings:
+            if category != "All Categories" and finding.get("_category") != category:
+                continue
+            if soc != "All Entities" and str(finding.get("soc_id")) != soc:
+                continue
+            if severity != "All Severities" and self.finding_severity(finding) != severity:
+                continue
+            if finding_type != "All Finding Types" and str(finding.get("finding_type")) != finding_type:
+                continue
+            if rule != "All Rules" and str(finding.get("rule_id")) != rule:
+                continue
+
+            if query:
+                haystack = " ".join(str(finding.get(key, "")) for key in (
+                    "soc_id", "finding_type", "rule_id", "alert_id",
+                    "case_id", "assigned_analyst_id", "severity",
+                    "rationale")).lower()
+                if query not in haystack:
+                    continue
+
+            results.append(finding)
+
+        sort_mode = self.finding_sort.currentIndex()
+        if sort_mode == 0:
+            results.sort(key=lambda f: (
+                self.SEVERITY_RANK[self.finding_severity(f)],
+                str(f.get("soc_id")), str(f.get("finding_type"))))
+        elif sort_mode == 1:
+            results.sort(key=lambda f: (
+                str(f.get("soc_id")),
+                self.SEVERITY_RANK[self.finding_severity(f)]))
+        elif sort_mode == 2:
+            results.sort(key=lambda f: (
+                str(f.get("finding_type")),
+                self.SEVERITY_RANK[self.finding_severity(f)]))
+        else:
+            results.sort(key=lambda f: (
+                str(f.get("rule_id")),
+                self.SEVERITY_RANK[self.finding_severity(f)]))
+
+        return results
+
+    def refresh_findings(self):
+        if not hasattr(self, "finding_table"):
             return
 
-        selected_type = (
-            self.finding_type_filter.currentText()
-        )
+        self._sync_filter_options()
+        filtered = self.filtered_findings()
 
-        selected_soc = (
-            self.finding_soc_filter.currentText()
-        )
+        self.finding_count_label.setText(
+            f"{len(filtered):,} of {len(self.findings):,} findings")
 
-        selected_severity = (
-            self.finding_severity_filter.currentText()
-        )
+        self.finding_table.setSortingEnabled(False)
+        self.finding_table.setRowCount(len(filtered))
 
-        # Refresh SOC filter
-        current_soc = selected_soc
-
-        socs = sorted(
-            {
-                f.get("soc_id")
-                for f in self.findings
-                if f.get("soc_id")
-            }
-        )
-
-        self.finding_soc_filter.blockSignals(
-            True
-        )
-
-        self.finding_soc_filter.clear()
-        self.finding_soc_filter.addItem(
-            "All SOCs"
-        )
-
-        for soc in socs:
-            self.finding_soc_filter.addItem(
-                soc
-            )
-
-        index = self.finding_soc_filter.findText(
-            current_soc
-        )
-
-        if index >= 0:
-            self.finding_soc_filter.setCurrentIndex(
-                index
-            )
-
-        self.finding_soc_filter.blockSignals(
-            False
-        )
-
-        filtered = []
-
-        for finding in self.findings:
-            if (
-                selected_type != "All Findings"
-                and finding.get("_category")
-                != selected_type
-            ):
-                continue
-
-            if (
-                selected_soc != "All SOCs"
-                and finding.get("soc_id")
-                != selected_soc
-            ):
-                continue
-
-            severity = str(
-                finding.get(
-                    "severity",
-                    "",
-                )
-            ).upper()
-
-            if (
-                selected_severity
-                != "All Severities"
-                and severity
-                != selected_severity
-            ):
-                continue
-
-            filtered.append(
-                finding
-            )
-
-        self.finding_table.setRowCount(
-            len(filtered)
-        )
-
-        for row, finding in enumerate(
-            filtered
-        ):
-            values = [
-                finding.get(
-                    "severity",
-                    "N/A",
-                ),
-                finding.get(
-                    "finding_type",
-                    "N/A",
-                ),
-                finding.get(
-                    "soc_id",
-                    "N/A",
-                ),
-                finding.get(
-                    "alert_id",
-                    "—",
-                ),
-                finding.get(
-                    "case_id",
-                    "—",
-                ),
-                finding.get(
-                    "rule_id",
-                    "N/A",
-                ),
-                finding.get(
-                    "assigned_analyst_id",
-                    "—",
-                ),
+        for row, finding in enumerate(filtered):
+            severity = self.finding_severity(finding)
+            cells = [
+                severity,
+                str(finding.get("_category", "")),
+                str(finding.get("soc_id", "")),
+                str(finding.get("finding_type", "")),
+                str(finding.get("rule_id", "")),
+                str(finding.get("alert_id") or "—"),
+                str(finding.get("assigned_analyst_id") or "—"),
             ]
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if column == 0:
+                    item.setForeground(QColor(severity_color(severity)))
+                self.finding_table.setItem(row, column, item)
 
-            for column, value in enumerate(
-                values
-            ):
-                self.finding_table.setItem(
-                    row,
-                    column,
-                    QTableWidgetItem(
-                        str(value)
-                    ),
-                )
+            self.finding_table.item(row, 0).setData(Qt.UserRole, finding)
 
-            # Store complete finding
-            self.finding_table.item(
-                row,
-                0,
-            ).setData(
-                Qt.UserRole,
-                finding,
-            )
+        self.finding_table.resizeColumnsToContents()
 
-        self.finding_detail_title.setText(
-            f"{len(filtered)} finding(s)"
-        )
-
-        self.finding_detail.clear()
+        if not filtered:
+            self.finding_detail_title.setText("No findings match the filters")
+            self.finding_detail.clear()
+            self.clear_source_panel()
+            self.ai_explanation_panel.hide()
 
     def finding_selected(self):
         rows = self.finding_table.selectedItems()
-
         if not rows:
             return
+        item = self.finding_table.item(rows[0].row(), 0)
+        finding = item.data(Qt.UserRole) if item else None
+        if finding:
+            self.show_finding_detail(finding)
 
-        item = self.finding_table.item(
-            rows[0].row(),
-            0,
-        )
+    # ------------------------------------------------------------------
+    # Finding detail — the audit chain
+    # ------------------------------------------------------------------
 
-        finding = item.data(
-            Qt.UserRole
-        )
+    def show_finding_detail(self, finding):
+        """
+        Render the deterministic record verbatim.
 
-        if not finding:
+        Nothing here rephrases, summarises, or re-derives a finding. The
+        rationale and evidence are printed exactly as the rule engine
+        produced them; the rule description is a fixed statement of what
+        the rule tests, with threshold values read from the live
+        assessment configuration.
+        """
+        self.current_finding = finding
+
+        severity = self.finding_severity(finding)
+        finding_type = str(finding.get("finding_type", "UNKNOWN"))
+        rule_id = str(finding.get("rule_id", "UNKNOWN"))
+
+        self.finding_detail_title.setText(f"{severity} — {finding_type}")
+        self.finding_provenance.setText(
+            "Produced by a deterministic rule. Every value below is "
+            "recorded output, not interpretation.")
+
+        lines = [
+            "FINDING",
+            "─" * 46,
+            f"Category            {finding.get('_category', 'N/A')}",
+            f"Finding type        {finding_type}",
+            f"Severity            {severity}",
+            f"Entity              {finding.get('soc_id', 'N/A')}",
+            f"Alert               {finding.get('alert_id') or '—'}",
+            f"Case                {finding.get('case_id') or '—'}",
+            f"Analyst             {finding.get('assigned_analyst_id') or '—'}",
+            "",
+            f"RULE — {rule_id}",
+            "─" * 46,
+        ]
+
+        rule = rule_reference.describe(rule_id, self.assessment_config())
+        if rule:
+            lines.append(rule["checks"])
+            if rule["thresholds"]:
+                lines.append("")
+                lines.append("Configured thresholds used by this rule:")
+                for key, value in rule["thresholds"]:
+                    lines.append(f"  {key} = {value}")
+        else:
+            lines.append("No rule description available for this rule id.")
+
+        lines += [
+            "",
+            "RATIONALE (deterministic)",
+            "─" * 46,
+            str(finding.get("rationale", "No rationale recorded.")),
+            "",
+            "EVIDENCE (deterministic)",
+            "─" * 46,
+            json.dumps(finding.get("evidence", {}), indent=2, default=str),
+        ]
+
+        self.finding_detail.setPlainText("\n".join(lines))
+
+        self.clear_source_panel()
+        self.show_ai_explanation(finding)
+
+    def assessment_config(self) -> dict:
+        """The configuration the loaded assessment ran under."""
+        if getattr(self, "_assessment_config", None) is None:
+            try:
+                import yaml
+                with open(self.project_root / "config"
+                           / "assessment_rules.yaml") as handle:
+                    self._assessment_config = yaml.safe_load(handle)
+            except Exception:
+                self._assessment_config = {}
+        return self._assessment_config
+
+    # ------------------------------------------------------------------
+    # Source records
+    # ------------------------------------------------------------------
+
+    def clear_source_panel(self):
+        self.source_detail.clear()
+        self.source_button.setEnabled(getattr(self, "current_finding", None)
+                                       is not None)
+        self.source_button.setText("Load source records")
+
+    def load_source_records(self):
+        """
+        Re-read the submitted records behind the selected finding.
+
+        Read back from the dataset rather than from anything the
+        pipeline cached, so what a supervisor verifies is the submission
+        itself.
+        """
+        finding = getattr(self, "current_finding", None)
+        if finding is None:
             return
 
-        self.show_finding_detail(
-            finding
-        )
+        dataset_path = self.session.dataset_path or self.dataset_path
+        self.source_button.setEnabled(False)
+        self.source_button.setText("Loading…")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            bundle = self.evidence_service.bundle_for(finding, dataset_path)
+        except SourceUnavailable as exc:
+            self.source_detail.setPlainText(
+                f"SOURCE RECORDS UNAVAILABLE\n{'─' * 46}\n{exc}\n\n"
+                "This does not mean the finding lacks evidence — the "
+                "evidence recorded by the rule is shown above. It means "
+                "the original submission could not be re-read from disk."
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.source_button.setEnabled(True)
+            self.source_button.setText("Reload source records")
+
+        self.source_detail.setPlainText(self.format_source_bundle(bundle))
+
+    @staticmethod
+    def format_source_bundle(bundle: dict) -> str:
+        grain = bundle.get("_grain", "record")
+        lines = [
+            f"SOURCE RECORDS  (this finding is at {grain} grain)",
+            "─" * 46,
+            "Rows as supplied in the submission.",
+            "",
+        ]
+
+        for name, value in bundle.items():
+            if name == "_grain":
+                continue
+
+            heading = name.replace("_", " ").upper()
+
+            if isinstance(value, list):
+                lines.append(f"{heading}  ({len(value)} row(s))")
+                if not value:
+                    lines.append("  none recorded")
+                for row in value:
+                    lines.append("  " + json.dumps(row, default=str))
+            elif isinstance(value, dict):
+                lines.append(heading)
+                lines.append("  " + json.dumps(value, indent=2, default=str)
+                              .replace("\n", "\n  "))
+            else:
+                lines.append(f"{heading}: {value}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # AI explanation — structurally separate from the record above
+    # ------------------------------------------------------------------
 
     @staticmethod
     def narration_key(record):
@@ -1763,9 +1954,9 @@ class MainWindow(QMainWindow):
 
         Findings and review-queue rows are separate objects describing
         the same underlying finding, so they are matched on identity
-        rather than by mutating one from the other. Returns None when
-        the finding was outside the explanation scope, which is the
-        normal case for most findings.
+        rather than by mutating one from the other. Returns None when the
+        finding was outside the explanation scope, which is the normal
+        case for most findings.
         """
         wanted = self.narration_key(finding)
         for record in self.review_queue:
@@ -1775,85 +1966,34 @@ class MainWindow(QMainWindow):
                 return record
         return None
 
-    def narration_block(self, finding):
-        """Rendered explanation section, or an empty list if there is none."""
+    def show_ai_explanation(self, finding):
         record = self.narration_for(finding)
+
         if record is None:
-            return []
+            self.ai_explanation_panel.hide()
+            self.ai_explanation_text.clear()
+            return
 
-        heading = ("AI EXPLANATION" if not record.get("narration_is_mock")
-                   else "SAMPLE EXPLANATION (NO MODEL)")
+        is_mock = bool(record.get("narration_is_mock"))
+        header = ("SAMPLE EXPLANATION — NO LANGUAGE MODEL"
+                  if is_mock else
+                  f"AI EXPLANATION — {record.get('narration_model', 'local model')}")
 
-        lines = ["", heading, "\u2500" * 12,
-                 record.get("narrated_explanation", "")]
+        self.ai_explanation_header.setText(header)
+        self.ai_explanation_header.setProperty(
+            "state", "mock" if is_mock else "model")
+        self.ai_explanation_header.style().unpolish(self.ai_explanation_header)
+        self.ai_explanation_header.style().polish(self.ai_explanation_header)
 
-        provenance = record.get("narration_provenance")
-        if provenance:
-            lines += ["", provenance]
+        provenance = record.get("narration_provenance", "")
+        self.ai_explanation_text.setPlainText(
+            record.get("narrated_explanation", ""))
+        self.ai_explanation_footer.setText(
+            (provenance + "\n\n" if provenance else "")
+            + "Supplementary only. The rule, rationale and evidence above "
+            "are the authoritative record and were produced without it.")
 
-        lines += [
-            "",
-            "This explanation is advisory. The rule, evidence, severity "
-            "and score above are the authoritative record and were "
-            "produced without it.",
-        ]
-        return lines
-
-    def show_finding_detail(self, finding):
-        finding_type = finding.get(
-            "finding_type",
-            "UNKNOWN",
-        )
-
-        severity = finding.get(
-            "severity",
-            "N/A",
-        )
-
-        category = finding.get(
-            "_category",
-            "Finding",
-        )
-
-        self.finding_detail_title.setText(
-            f"{severity} — {finding_type}"
-        )
-
-        evidence = finding.get(
-            "evidence",
-            {},
-        )
-
-        lines = [
-            f"Category: {category}",
-            f"SOC: {finding.get('soc_id', 'N/A')}",
-            f"Finding Type: {finding_type}",
-            f"Severity: {severity}",
-            f"Rule: {finding.get('rule_id', 'N/A')}",
-            f"Alert ID: {finding.get('alert_id', 'N/A')}",
-            f"Case ID: {finding.get('case_id', 'N/A')}",
-            f"Analyst: {finding.get('assigned_analyst_id', 'N/A')}",
-            "",
-            "RATIONALE",
-            "────────────",
-            finding.get(
-                "rationale",
-                "No rationale available.",
-            ),
-            "",
-            "EVIDENCE",
-            "────────────",
-            json.dumps(
-                evidence,
-                indent=2,
-            ),
-        ]
-
-        lines += self.narration_block(finding)
-
-        self.finding_detail.setPlainText(
-            "\n".join(lines)
-        )
+        self.ai_explanation_panel.show()
 
     # ============================================================
     # REVIEW QUEUE
@@ -2081,7 +2221,21 @@ class MainWindow(QMainWindow):
             ),
         ]
 
-        text += self.narration_block(review)
+        record = self.narration_for(review)
+        if record is not None:
+            is_mock = bool(record.get("narration_is_mock"))
+            text += [
+                "",
+                ("SAMPLE EXPLANATION — NO LANGUAGE MODEL" if is_mock
+                 else f"AI EXPLANATION — {record.get('narration_model', '')}"),
+                "─" * 12,
+                record.get("narrated_explanation", ""),
+                "",
+                record.get("narration_provenance", ""),
+                "",
+                "Supplementary only. The rule, rationale and evidence "
+                "above are the authoritative record.",
+            ]
 
         self.review_detail.setPlainText(
             "\n".join(text)
@@ -2505,6 +2659,46 @@ class MainWindow(QMainWindow):
                 background: #182231;
                 border: 1px solid #222d3b;
                 border-radius: 8px;
+            }
+            QTextEdit#deterministic_detail {
+                background-color: #141b26;
+                border: 1px solid #2b3648;
+                border-left: 3px solid #4a6fa5;
+                border-radius: 4px;
+                font-family: monospace;
+                font-size: 11px;
+                padding: 8px;
+            }
+            QTextEdit#source_detail {
+                background-color: #10161f;
+                border: 1px solid #222d3b;
+                border-radius: 4px;
+                font-family: monospace;
+                font-size: 10px;
+                padding: 8px;
+                color: #a9b6c9;
+            }
+            /* Visually distinct from the authoritative panels above:
+               dashed border and a warm accent so a supplementary
+               explanation can never be mistaken for the record. */
+            QFrame#ai_panel {
+                background-color: #1c1a17;
+                border: 1px dashed #6b5a3a;
+                border-radius: 6px;
+                padding: 6px;
+            }
+            QLabel#ai_panel_header {
+                font-weight: 700;
+                font-size: 11px;
+                color: #e8c07d;
+                padding: 2px;
+            }
+            QLabel#ai_panel_header[state="mock"] { color: #9fb8e0; }
+            QTextEdit#ai_panel_text {
+                background-color: #15140f;
+                border: none;
+                font-size: 11px;
+                color: #cfc6b4;
             }
             QLabel#empty_state {
                 color: #7d8899;
