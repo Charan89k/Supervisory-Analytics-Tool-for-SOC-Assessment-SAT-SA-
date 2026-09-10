@@ -39,6 +39,7 @@ from analytics.narration.base import STATE_DISABLED, BackendStatus
 from analytics.ingestion import describe_supported_inputs
 from application.services import (
     benchmark_service,
+    capability_service,
     dashboard_service,
     review_service,
     rule_reference,
@@ -690,6 +691,33 @@ class MainWindow(QMainWindow):
         panels.addWidget(distribution_panel, 4)
 
         layout.addLayout(panels)
+
+        # ---- Capability standing ------------------------------------
+        # The problem statement frames the assessment as eight
+        # capabilities. Findings are the evidence; this is the question
+        # a supervisor is actually asked to form a view on, so it sits
+        # beside the drivers rather than on a page of its own.
+        layout.addWidget(self.section_title(
+            "Supervisory Capability Areas",
+            "What the findings say about the selected entity's "
+            "capabilities"))
+
+        self.capability_note = QLabel("")
+        self.capability_note.setObjectName("caveat")
+        self.capability_note.setWordWrap(True)
+        layout.addWidget(self.capability_note)
+
+        self.capability_table = QTableWidget()
+        self.capability_table.setColumnCount(5)
+        self.capability_table.setHorizontalHeaderLabels(
+            ["Capability Area", "Supervisory Question", "Findings",
+             "Score Contribution", "What the findings show"])
+        self.capability_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.capability_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.capability_table.verticalHeader().setVisible(False)
+        self.capability_table.horizontalHeader().setStretchLastSection(True)
+        self.capability_table.setMinimumHeight(250)
+        layout.addWidget(self.capability_table)
 
         # ---- WHAT TO REVIEW ----------------------------------------
         layout.addWidget(self.section_title(
@@ -1447,6 +1475,7 @@ class MainWindow(QMainWindow):
                 item["_category"] = (
                     "Execution Gap"
                 )
+                item["_capability"] = self.capability_of(item)
 
                 self.findings.append(item)
 
@@ -1460,6 +1489,7 @@ class MainWindow(QMainWindow):
                 item["_category"] = (
                     "Negative Space"
                 )
+                item["_capability"] = self.capability_of(item)
 
                 self.findings.append(item)
 
@@ -1559,6 +1589,9 @@ class MainWindow(QMainWindow):
         self.finding_rule_filter = QComboBox()
         self.finding_rule_filter.addItem("All Rules")
 
+        self.finding_capability_filter = QComboBox()
+        self.finding_capability_filter.addItem("All Capability Areas")
+
         self.finding_sort = QComboBox()
         self.finding_sort.addItems([
             "Sort: Severity (worst first)",
@@ -1573,6 +1606,7 @@ class MainWindow(QMainWindow):
             (self.finding_severity_filter, "Severity"),
             (self.finding_type_filter, "Type"),
             (self.finding_rule_filter, "Rule"),
+            (self.finding_capability_filter, "Capability"),
             (self.finding_sort, "Sort"),
         ):
             widget.setMinimumWidth(150)
@@ -1590,10 +1624,10 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
 
         self.finding_table = QTableWidget()
-        self.finding_table.setColumnCount(7)
+        self.finding_table.setColumnCount(8)
         self.finding_table.setHorizontalHeaderLabels(
-            ["Severity", "Category", "Entity", "Finding Type", "Rule",
-             "Alert", "Analyst"])
+            ["Severity", "Category", "Capability Area", "Entity",
+             "Finding Type", "Rule", "Alert", "Analyst"])
         self.finding_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.finding_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.finding_table.setSelectionMode(QTableWidget.SingleSelection)
@@ -1616,7 +1650,8 @@ class MainWindow(QMainWindow):
     def clear_finding_filters(self):
         for widget in (self.finding_category_filter, self.finding_soc_filter,
                         self.finding_severity_filter, self.finding_type_filter,
-                        self.finding_rule_filter):
+                        self.finding_rule_filter,
+                        self.finding_capability_filter):
             widget.blockSignals(True)
             widget.setCurrentIndex(0)
             widget.blockSignals(False)
@@ -1645,12 +1680,23 @@ class MainWindow(QMainWindow):
         text = str(value).strip().upper()
         return text if text in MainWindow.SEVERITY_RANK else "UNRATED"
 
+    def capability_of(self, finding) -> str:
+        """
+        The capability area a finding speaks to, from the configured
+        mapping. Empty for a rule with no mapping, which is shown as
+        unmapped rather than filed under a guess.
+        """
+        return capability_service.capability_label(
+            finding.get("finding_type", ""), self.assessment_config())
+
     def _sync_filter_options(self):
         """Rebuild entity/type/rule choices from the loaded findings."""
         for widget, key, all_label in (
             (self.finding_soc_filter, "soc_id", "All Entities"),
             (self.finding_type_filter, "finding_type", "All Finding Types"),
             (self.finding_rule_filter, "rule_id", "All Rules"),
+            (self.finding_capability_filter, "_capability",
+             "All Capability Areas"),
         ):
             current = widget.currentText()
             values = sorted({str(f.get(key)) for f in self.findings
@@ -1673,6 +1719,7 @@ class MainWindow(QMainWindow):
         severity = self.finding_severity_filter.currentText()
         finding_type = self.finding_type_filter.currentText()
         rule = self.finding_rule_filter.currentText()
+        capability = self.finding_capability_filter.currentText()
         query = self.finding_search.text().strip().lower()
 
         results = []
@@ -1687,12 +1734,15 @@ class MainWindow(QMainWindow):
                 continue
             if rule != "All Rules" and str(finding.get("rule_id")) != rule:
                 continue
+            if (capability != "All Capability Areas"
+                    and str(finding.get("_capability")) != capability):
+                continue
 
             if query:
                 haystack = " ".join(str(finding.get(key, "")) for key in (
                     "soc_id", "finding_type", "rule_id", "alert_id",
                     "case_id", "assigned_analyst_id", "severity",
-                    "rationale")).lower()
+                    "_capability", "rationale")).lower()
                 if query not in haystack:
                     continue
 
@@ -1736,6 +1786,7 @@ class MainWindow(QMainWindow):
             cells = [
                 severity,
                 str(finding.get("_category", "")),
+                str(finding.get("_capability") or "—"),
                 str(finding.get("soc_id", "")),
                 str(finding.get("finding_type", "")),
                 str(finding.get("rule_id", "")),
@@ -2783,12 +2834,51 @@ class MainWindow(QMainWindow):
                           if soc_id else "Risk Drivers & Evidence")
 
         self.update_trend_chart()
+        self.refresh_capabilities(soc_id)
 
         severity = dashboard_service.severity_distribution(results, soc_id)
         self.severity_chart.set_data(severity.labels, severity.values)
 
         category = dashboard_service.category_distribution(results, soc_id)
         self.category_chart.set_data(category.labels, category.values)
+
+    def refresh_capabilities(self, soc_id):
+        """Capability standing for the entity selected in the ranking."""
+        if not self.current_result or not soc_id:
+            self.capability_table.setRowCount(0)
+            return
+
+        config = self.assessment_config()
+        entity = next((e for e in self.current_result.get("entities", [])
+                       if e.get("soc_id") == soc_id), None)
+        if entity is None:
+            self.capability_table.setRowCount(0)
+            return
+
+        self.capability_note.setText(
+            capability_service.coverage_statement(config))
+
+        results = capability_service.assess_entity(entity, config)
+        results.sort(key=lambda r: (-r.contribution, r.area.label))
+
+        self.capability_table.setRowCount(len(results))
+        for row, result in enumerate(results):
+            cells = [
+                result.area.label,
+                result.area.question,
+                f"{result.finding_count:,}" if result.assessed else "—",
+                f"{result.contribution:,.2f}" if result.assessed else "—",
+                result.summary(),
+            ]
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if column == 4 and not result.assessed:
+                    item.setForeground(QColor("#e8c07d"))
+                elif column == 3 and result.contribution > 0:
+                    item.setForeground(QColor("#ec835a"))
+                self.capability_table.setItem(row, column, item)
+
+        self.capability_table.resizeColumnsToContents()
 
     def refresh_review_preview(self):
         preview = dashboard_service.review_preview(self.review_queue, limit=10)

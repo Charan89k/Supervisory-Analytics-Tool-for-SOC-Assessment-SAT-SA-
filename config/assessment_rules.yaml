@@ -202,3 +202,153 @@ llm_narration:
   severity_scope: "critical_high"
   # Only explain queue items at or above this rank; null = no limit.
   max_queue_rank: null
+
+capability_mapping:
+  # Maps every detection rule to one of the eight supervisory capability
+  # areas the official problem statement names. The mapping is a plain
+  # lookup — deterministic, auditable, and editable by a supervisor
+  # without touching code. No model is involved in deciding it.
+  #
+  # Each rule has exactly ONE primary capability. A finding often informs
+  # several, but attributing it to several would double-count it in every
+  # per-capability total and make the arithmetic impossible to check by
+  # hand. Secondary areas are recorded separately, for context only, and
+  # never scored.
+  #
+  # `why` states the reasoning for each assignment, so a supervisor can
+  # disagree with a mapping on its merits rather than having to guess at
+  # the intent.
+
+  areas:
+    THREAT_DETECTION:
+      label: "Threat Detection"
+      question: "Can the entity see what is happening in its estate?"
+    INVESTIGATION:
+      label: "Investigation"
+      question: "When something is seen, is it actually examined?"
+    ESCALATION:
+      label: "Escalation"
+      question: "Does what matters reach the people who must act on it?"
+    INCIDENT_RESPONSE:
+      label: "Incident Response"
+      question: "Are problems resolved, or do they recur?"
+    SECURITY_OPERATIONS:
+      label: "Security Operations"
+      question: "Is the operation resourced and running to its own targets?"
+    GOVERNANCE_OVERSIGHT:
+      label: "Governance and Oversight"
+      question: "Is there a record an examiner can supervise against?"
+    OPERATIONAL_DISCIPLINE:
+      label: "Operational Discipline"
+      question: "Is the work genuine, or shaped to satisfy metrics?"
+    CYBER_RESILIENCE:
+      label: "Cyber Resilience"
+      question: "Would the entity withstand and recover from a real event?"
+
+  rules:
+    TELEMETRY_GAP:
+      primary: THREAT_DETECTION
+      secondary: [CYBER_RESILIENCE]
+      why: >-
+        An expected telemetry source below its coverage threshold is a
+        blind spot: whatever happens there cannot be detected at all.
+
+    MISSING_ALERT_CATEGORY:
+      primary: THREAT_DETECTION
+      secondary: []
+      why: >-
+        A threat class that peers detect and this entity never reports
+        points at detection coverage rather than at a quieter estate.
+
+    FAST_CLOSURE:
+      primary: INVESTIGATION
+      secondary: [OPERATIONAL_DISCIPLINE]
+      why: >-
+        A high-severity alert closed faster than the work could
+        credibly have been done speaks to the depth of investigation.
+
+    MISSING_EVIDENCE:
+      primary: INVESTIGATION
+      secondary: [GOVERNANCE_OVERSIGHT]
+      why: >-
+        Investigation without a retained evidence record cannot be
+        verified afterwards, by a supervisor or by the entity itself.
+
+    MISSED_ESCALATION:
+      primary: ESCALATION
+      secondary: [INCIDENT_RESPONSE]
+      why: >-
+        An alert the entity's own policy required to be escalated, with
+        a record showing it was not, is escalation failing on its own
+        terms.
+
+    REOPENED_CASE:
+      primary: INCIDENT_RESPONSE
+      secondary: [INVESTIGATION]
+      why: >-
+        A case closed and then reopened indicates the first resolution
+        did not hold. Reopening can also reflect legitimate new
+        information, which is why it is an indicator and not a fault.
+
+    REPEATED_ALERT_WITHOUT_REMEDIATION:
+      primary: INCIDENT_RESPONSE
+      secondary: [CYBER_RESILIENCE]
+      why: >-
+        The same condition recurring on one asset with no remediation
+        recorded is response treating symptoms rather than causes.
+
+    SLOW_TRIAGE:
+      primary: SECURITY_OPERATIONS
+      secondary: [OPERATIONAL_DISCIPLINE]
+      why: >-
+        Acknowledgement well beyond the entity's own SLA is an
+        operational throughput and staffing question before it is
+        anything else.
+
+    ANALYST_OVERLOAD:
+      primary: SECURITY_OPERATIONS
+      secondary: []
+      why: >-
+        Alert volume concentrated on one analyst relative to peers in
+        the same SOC is a resourcing and workload-distribution
+        question, not a judgement on that analyst.
+
+    MISSING_ESCALATION_RECORDS:
+      primary: GOVERNANCE_OVERSIGHT
+      secondary: [ESCALATION]
+      why: >-
+        Where escalation records are largely absent, whether escalation
+        happened cannot be determined either way. That is a
+        record-keeping failure before it is an escalation failure, and
+        it is what makes the entity unsupervisable.
+
+    MISSING_INVESTIGATIONS:
+      primary: GOVERNANCE_OVERSIGHT
+      secondary: [INVESTIGATION]
+      why: >-
+        Cases closed with no investigation notes at all leave nothing
+        for an examiner, or the entity's own management, to review.
+
+    ACK_WITHOUT_INVESTIGATION:
+      primary: OPERATIONAL_DISCIPLINE
+      secondary: [INVESTIGATION]
+      why: >-
+        Acknowledging an alert and closing it with no investigation in
+        between satisfies response-time metrics while leaving the alert
+        unexamined — the problem statement's example of behaviour
+        shaped to meet a measure rather than to reduce risk.
+
+    REPETITIVE_INVESTIGATION:
+      primary: OPERATIONAL_DISCIPLINE
+      secondary: [INVESTIGATION]
+      why: >-
+        Byte-identical investigation notes across many cases indicate
+        template-driven handling rather than case-specific work.
+
+    LOW_ACTIVITY_OUTLIER:
+      primary: CYBER_RESILIENCE
+      secondary: [THREAT_DETECTION]
+      why: >-
+        Alert volume far below comparable entities more often reflects
+        limited monitoring reach than a genuinely quieter estate, and
+        speaks to whether the entity would see a real event at all.

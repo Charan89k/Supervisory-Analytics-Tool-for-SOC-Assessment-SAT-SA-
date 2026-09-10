@@ -558,7 +558,52 @@ def main():
     ok("assessment completed with an unavailable model; skip was reported")
     os.environ["SATSA_NARRATION_BACKEND"] = forced_backend
 
-    print("\n[14b] Peer benchmarking")
+    print("\n[14a] Capability mapping")
+    window.show_page(0)
+    assert window.capability_table.rowCount() == 8
+    ok("all eight supervisory capability areas reported")
+
+    labels = [window.capability_table.item(r, 0).text()
+              for r in range(window.capability_table.rowCount())]
+    for expected in ("Threat Detection", "Investigation", "Escalation",
+                      "Incident Response", "Security Operations",
+                      "Governance and Oversight", "Operational Discipline",
+                      "Cyber Resilience"):
+        assert expected in labels, expected
+    ok("areas match the problem statement's eight")
+
+    # Contributions must still sum to the entity's own risk score, or a
+    # finding has been counted against more than one capability.
+    from application.services import capability_service as _cs
+    soc_id = window.selected_dashboard_entity()
+    entity = next(e for e in window.current_result["entities"]
+                  if e["soc_id"] == soc_id)
+    total = sum(r.contribution
+                for r in _cs.assess_entity(entity, window.assessment_config()))
+    assert abs(total - entity["supervisory_risk_score"]) < 0.05
+    ok(f"capability contributions sum to {soc_id}'s risk score "
+       f"({total:.2f}) — no double counting")
+
+    assert "no rule fired" in window.capability_note.text()
+    ok("coverage note distinguishes 'no findings' from 'verified'")
+
+    print("\n[14b] Findings explorer: capability area")
+    window.show_page(2)
+    window.clear_finding_filters()
+    total_rows = window.finding_table.rowCount()
+    window.finding_capability_filter.setCurrentText("Escalation")
+    escalation = window.finding_table.rowCount()
+    assert 0 < escalation < total_rows
+    ok(f"capability filter: {total_rows} -> {escalation} rows")
+    window.clear_finding_filters()
+
+    window.finding_table.selectRow(0)
+    detail = window.finding_detail_panel.detail.toPlainText()
+    assert "Capability area" in detail
+    assert "CAPABILITY AREA —" in detail
+    ok("finding detail names its capability area and why")
+
+    print("\n[14c] Peer benchmarking")
     window.show_page(5)
     assert window.group_table.rowCount() > 0
     ok(f"{window.group_table.rowCount()} peer group(s) listed")

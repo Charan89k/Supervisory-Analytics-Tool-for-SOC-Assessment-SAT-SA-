@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from application.services import rule_reference
+from application.services import capability_service, rule_reference
 
 RULE_SEPARATOR = "─" * 46
 
@@ -182,10 +182,16 @@ class FindingDetailPanel(QWidget):
         # the same thing rather than one showing "N/A".
         category = (finding.get("_category")
                     or rule_reference.category_for(rule_id))
+        capability = capability_service.capability_for(finding_type, config)
 
         lines = ["FINDING", RULE_SEPARATOR]
         if category:
             lines.append(f"Category            {category}")
+        if capability is not None:
+            areas = capability_service.load_areas(config)
+            area = areas.get(capability.primary)
+            lines.append(
+                f"Capability area     {area.label if area else capability.primary}")
         lines += [
             f"Finding type        {finding_type}",
             f"Severity            {severity}",
@@ -208,6 +214,23 @@ class FindingDetailPanel(QWidget):
                     lines.append(f"  {key} = {value}")
         else:
             lines.append("No rule description available for this rule id.")
+
+        if capability is not None and capability.why:
+            areas = capability_service.load_areas(config)
+            area = areas.get(capability.primary)
+            lines += [
+                "",
+                f"CAPABILITY AREA — {area.label if area else capability.primary}",
+                RULE_SEPARATOR,
+                capability.why,
+            ]
+            if capability.secondary:
+                secondary = ", ".join(
+                    (areas[key].label if key in areas else key)
+                    for key in capability.secondary)
+                lines.append("")
+                lines.append(f"Also informs: {secondary} (context only, "
+                              f"not scored against those areas).")
 
         lines += [
             "",
