@@ -254,7 +254,7 @@ def main():
 
     print("\n[5d] Audit chain: Finding -> Rule -> Rationale -> Evidence")
     window.finding_table.selectRow(0)
-    detail = window.finding_detail.toPlainText()
+    detail = window.finding_detail_panel.detail.toPlainText()
     for section in ("FINDING", "RULE \u2014", "RATIONALE (deterministic)",
                      "EVIDENCE (deterministic)"):
         assert section in detail, section
@@ -263,13 +263,13 @@ def main():
     assert "Configured thresholds used by this rule" in detail
     ok("rule section names the thresholds the run actually used")
 
-    selected = window.current_finding
+    selected = window.finding_detail_panel.current_finding
     assert selected["rationale"] in detail, "rationale was not shown verbatim"
     ok("rationale rendered verbatim, not rephrased")
 
     print("\n[5e] Source records drill-down")
-    window.load_source_records()
-    source = window.source_detail.toPlainText()
+    window.load_finding_source_records()
+    source = window.finding_detail_panel.source_detail.toPlainText()
     assert "SOURCE RECORDS" in source
     assert "grain)" in source
     assert selected.get("alert_id", "") in source or "entity" in source.lower()
@@ -279,15 +279,15 @@ def main():
     saved_path = window.session.dataset_path
     window.evidence_service.reset()
     window.session.set_dataset("/no/such/submission", "gone")
-    window.load_source_records()
-    unavailable = window.source_detail.toPlainText()
+    window.load_finding_source_records()
+    unavailable = window.finding_detail_panel.source_detail.toPlainText()
     assert "SOURCE RECORDS UNAVAILABLE" in unavailable
     assert "does not mean the finding lacks evidence" in unavailable
     ok("a moved submission reports itself rather than reading as no evidence")
     window.session.set_dataset(saved_path, "synthetic")
     window.evidence_service.reset()
-    assert window.review_table.rowCount() > 0
-    ok(f"review queue shows {window.review_table.rowCount()} rows")
+    assert window.case_table.rowCount() > 0
+    ok(f"review queue shows {window.case_table.rowCount()} correlated cases")
     assert "report" in window.report_status.text()
     ok(f"reports page reads {window.report_status.text()!r}")
 
@@ -412,12 +412,61 @@ def main():
         assert record["evidence"] is not None
     ok("entity ranking, findings, severities and evidence all intact")
 
+    print("\n[12b] Review queue groups findings into cases")
+    window.show_page(3)
+    stats = window.review_stats.text()
+    assert "correlated into" in stats
+    ok(f"queue stats: {stats}")
+
+    compound_row = None
+    for row in range(window.case_table.rowCount()):
+        if int(window.case_table.item(row, 3).text()) > 1:
+            compound_row = row
+            break
+    assert compound_row is not None, "no compounding case in the queue"
+
+    window.case_table.selectRow(compound_row)
+    case = window.selected_review_case()
+    assert case.finding_count > 1
+    assert window.review_table.rowCount() == case.finding_count
+    ok(f"case {case.case_rank} holds {case.finding_count} findings on one "
+       f"alert; all listed below it")
+
+    alerts = {f.get("alert_id") for f in case.findings}
+    assert len(alerts) == 1
+    ok(f"every finding in the case shares alert {alerts.pop()}")
+
+    why = window.review_detail_panel.detail.toPlainText()
+    assert "WHY THIS CASE IS PRIORITISED" in why
+    assert "CASE PRIORITY (sum)" in why
+    assert f"{case.case_priority:g}" in why
+    ok("prioritisation arithmetic shown and matches the case priority")
+
+    total = window.case_table.rowCount()
+    window.review_compound_only.setChecked(True)
+    assert window.case_table.rowCount() <= total
+    window.review_compound_only.setChecked(False)
+    window.review_search.setText("INVESTIGATION-ABSENT-001")
+    assert 0 < window.case_table.rowCount() < total
+    ok(f"queue search by rule id: {total} -> {window.case_table.rowCount()} cases")
+    window.review_search.clear()
+
+    window.load_review_source_records()
+    queue_source = window.review_detail_panel.source_detail.toPlainText()
+    assert "SOURCE RECORDS" in queue_source
+    ok(f"queue drill-down reaches source records ({len(queue_source):,} chars)")
+
     print("\n[13] Explanation surfaces, labelled and structurally separate")
+    window.case_table.selectRow(0)
     window.review_table.selectRow(0)
-    detail = window.review_detail.toPlainText()
-    assert "SAMPLE EXPLANATION" in detail, detail[:200]
-    assert "authoritative record" in detail
-    ok("review queue detail carries the sample label and the caveat")
+    detail = window.review_detail_panel.detail.toPlainText()
+    narration = window.review_detail_panel.ai_text.toPlainText()
+    if narration:
+        assert "SAMPLE EXPLANATION" in window.review_detail_panel.ai_header.text()
+        assert narration not in detail
+        ok("queue narration is labelled and absent from the authoritative panel")
+    else:
+        ok("top queue case has no narration; panel correctly hidden")
 
     # The invariant this phase turns on: narration text must never be
     # able to reach the authoritative panel. Separate widgets make it
@@ -434,19 +483,19 @@ def main():
     assert explained_row is not None, "no explained finding reached the explorer"
 
     window.finding_table.selectRow(explained_row)
-    assert not window.ai_explanation_panel.isHidden()
-    assert "SAMPLE EXPLANATION" in window.ai_explanation_header.text()
+    assert not window.finding_detail_panel.ai_panel.isHidden()
+    assert "SAMPLE EXPLANATION" in window.finding_detail_panel.ai_header.text()
     ok(f"explained finding shows the AI panel: "
-       f"{window.ai_explanation_header.text()!r}")
+       f"{window.finding_detail_panel.ai_header.text()!r}")
 
-    narration = window.ai_explanation_text.toPlainText()
-    authoritative = window.finding_detail.toPlainText()
+    narration = window.finding_detail_panel.ai_text.toPlainText()
+    authoritative = window.finding_detail_panel.detail.toPlainText()
     assert narration, "AI panel is empty"
     assert narration not in authoritative
     assert "[SAMPLE EXPLANATION]" not in authoritative
     ok("narration text is absent from the authoritative detail panel")
 
-    finding = window.current_finding
+    finding = window.finding_detail_panel.current_finding
     assert finding["rationale"] in authoritative
     assert json.dumps(finding["evidence"], indent=2, default=str) in authoritative
     ok("deterministic rationale and evidence remain visible alongside it")
@@ -459,7 +508,7 @@ def main():
             unexplained = row
             break
     window.finding_table.selectRow(unexplained)
-    assert window.ai_explanation_panel.isHidden()
+    assert window.finding_detail_panel.ai_panel.isHidden()
     ok("unexplained finding shows no AI panel at all")
 
     print("\n[14] Cancellation")

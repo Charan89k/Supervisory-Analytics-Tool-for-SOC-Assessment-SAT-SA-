@@ -37,7 +37,11 @@ from PySide6.QtWidgets import (
 
 from analytics.narration.base import STATE_DISABLED, BackendStatus
 from analytics.ingestion import describe_supported_inputs
-from application.services import dashboard_service, rule_reference
+from application.services import (
+    dashboard_service,
+    review_service,
+    rule_reference,
+)
 from application.services.evidence_service import (
     EvidenceService,
     SourceUnavailable,
@@ -55,6 +59,7 @@ from application.pages.settings_page import SettingsPage
 from application.services.narration_service import NarrationService
 from application.services.settings_service import SettingsService
 from application.widgets.charts import make_bar_chart, severity_color
+from application.widgets.finding_detail import FindingDetailPanel
 from application.widgets.drop_zone import DropZone
 from application.worker import AssessmentWorker, ValidationWorker
 from application.services.ai_config import AIConfig, create_ai_config
@@ -1548,87 +1553,12 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.finding_table)
 
         # ---- Detail panel -------------------------------------------
-        detail_scroll = QScrollArea()
-        detail_scroll.setWidgetResizable(True)
-        detail_scroll.setFrameShape(QFrame.NoFrame)
-        detail_host = QWidget()
-        detail_layout = QVBoxLayout(detail_host)
-        detail_layout.setContentsMargins(12, 0, 4, 0)
-        detail_layout.setSpacing(8)
-
-        self.finding_detail_title = QLabel("Select a finding")
-        self.finding_detail_title.setObjectName("detail_title")
-        self.finding_detail_title.setWordWrap(True)
-        detail_layout.addWidget(self.finding_detail_title)
-
-        self.finding_provenance = QLabel("")
-        self.finding_provenance.setObjectName("caveat")
-        self.finding_provenance.setWordWrap(True)
-        detail_layout.addWidget(self.finding_provenance)
-
-        # 1-4: Finding, Rule, Rationale, Evidence — all deterministic,
-        # all verbatim from the rule engine.
-        self.finding_detail = QTextEdit()
-        self.finding_detail.setReadOnly(True)
-        self.finding_detail.setObjectName("deterministic_detail")
-        self.finding_detail.setMinimumHeight(300)
-        detail_layout.addWidget(self.finding_detail)
-
-        # 5: Source records — read back from the submission on demand.
-        source_header = QHBoxLayout()
-        source_title = QLabel("SOURCE RECORDS")
-        source_title.setObjectName("section_title")
-        source_header.addWidget(source_title)
-        source_header.addStretch()
-        self.source_button = QPushButton("Load source records")
-        self.source_button.setCursor(Qt.PointingHandCursor)
-        self.source_button.clicked.connect(self.load_source_records)
-        source_header.addWidget(self.source_button)
-        detail_layout.addLayout(source_header)
-
-        self.source_hint = QLabel(
-            "The submitted records this finding was derived from, read "
-            "back from the dataset exactly as supplied.")
-        self.source_hint.setObjectName("caveat")
-        self.source_hint.setWordWrap(True)
-        detail_layout.addWidget(self.source_hint)
-
-        self.source_detail = QTextEdit()
-        self.source_detail.setReadOnly(True)
-        self.source_detail.setObjectName("source_detail")
-        self.source_detail.setMinimumHeight(220)
-        detail_layout.addWidget(self.source_detail)
-
-        # 6: AI explanation — a separate widget, deliberately. Narration
-        # text has nowhere to go inside the panels above.
-        self.ai_explanation_panel = QFrame()
-        self.ai_explanation_panel.setObjectName("ai_panel")
-        ai_layout = QVBoxLayout(self.ai_explanation_panel)
-
-        self.ai_explanation_header = QLabel("")
-        self.ai_explanation_header.setObjectName("ai_panel_header")
-        self.ai_explanation_header.setWordWrap(True)
-        ai_layout.addWidget(self.ai_explanation_header)
-
-        self.ai_explanation_text = QTextEdit()
-        self.ai_explanation_text.setReadOnly(True)
-        self.ai_explanation_text.setObjectName("ai_panel_text")
-        self.ai_explanation_text.setMaximumHeight(150)
-        ai_layout.addWidget(self.ai_explanation_text)
-
-        self.ai_explanation_footer = QLabel(
-            "Supplementary only. The rule, rationale and evidence above "
-            "are the authoritative record and were produced without it.")
-        self.ai_explanation_footer.setObjectName("caveat")
-        self.ai_explanation_footer.setWordWrap(True)
-        ai_layout.addWidget(self.ai_explanation_footer)
-
-        self.ai_explanation_panel.hide()
-        detail_layout.addWidget(self.ai_explanation_panel)
-
-        detail_layout.addStretch()
-        detail_scroll.setWidget(detail_host)
-        splitter.addWidget(detail_scroll)
+        # Shared with the Review Queue so the AI-separation rule has one
+        # implementation rather than two that could drift apart.
+        self.finding_detail_panel = FindingDetailPanel()
+        self.finding_detail_panel.source_requested.connect(
+            self.load_finding_source_records)
+        splitter.addWidget(self.finding_detail_panel)
         splitter.setSizes([700, 640])
         layout.addWidget(splitter)
 
@@ -1765,10 +1695,7 @@ class MainWindow(QMainWindow):
         self.finding_table.resizeColumnsToContents()
 
         if not filtered:
-            self.finding_detail_title.setText("No findings match the filters")
-            self.finding_detail.clear()
-            self.clear_source_panel()
-            self.ai_explanation_panel.hide()
+            self.finding_detail_panel.clear("No findings match the filters")
 
     def finding_selected(self):
         rows = self.finding_table.selectedItems()
@@ -1784,67 +1711,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def show_finding_detail(self, finding):
-        """
-        Render the deterministic record verbatim.
-
-        Nothing here rephrases, summarises, or re-derives a finding. The
-        rationale and evidence are printed exactly as the rule engine
-        produced them; the rule description is a fixed statement of what
-        the rule tests, with threshold values read from the live
-        assessment configuration.
-        """
+        """Render the finding through the shared, read-only panel."""
         self.current_finding = finding
-
-        severity = self.finding_severity(finding)
-        finding_type = str(finding.get("finding_type", "UNKNOWN"))
-        rule_id = str(finding.get("rule_id", "UNKNOWN"))
-
-        self.finding_detail_title.setText(f"{severity} — {finding_type}")
-        self.finding_provenance.setText(
-            "Produced by a deterministic rule. Every value below is "
-            "recorded output, not interpretation.")
-
-        lines = [
-            "FINDING",
-            "─" * 46,
-            f"Category            {finding.get('_category', 'N/A')}",
-            f"Finding type        {finding_type}",
-            f"Severity            {severity}",
-            f"Entity              {finding.get('soc_id', 'N/A')}",
-            f"Alert               {finding.get('alert_id') or '—'}",
-            f"Case                {finding.get('case_id') or '—'}",
-            f"Analyst             {finding.get('assigned_analyst_id') or '—'}",
-            "",
-            f"RULE — {rule_id}",
-            "─" * 46,
-        ]
-
-        rule = rule_reference.describe(rule_id, self.assessment_config())
-        if rule:
-            lines.append(rule["checks"])
-            if rule["thresholds"]:
-                lines.append("")
-                lines.append("Configured thresholds used by this rule:")
-                for key, value in rule["thresholds"]:
-                    lines.append(f"  {key} = {value}")
-        else:
-            lines.append("No rule description available for this rule id.")
-
-        lines += [
-            "",
-            "RATIONALE (deterministic)",
-            "─" * 46,
-            str(finding.get("rationale", "No rationale recorded.")),
-            "",
-            "EVIDENCE (deterministic)",
-            "─" * 46,
-            json.dumps(finding.get("evidence", {}), indent=2, default=str),
-        ]
-
-        self.finding_detail.setPlainText("\n".join(lines))
-
-        self.clear_source_panel()
-        self.show_ai_explanation(finding)
+        self.finding_detail_panel.show_finding(
+            finding, self.assessment_config(),
+            narration=self.narration_for(finding))
 
     def assessment_config(self) -> dict:
         """The configuration the loaded assessment ran under."""
@@ -1859,35 +1730,31 @@ class MainWindow(QMainWindow):
         return self._assessment_config
 
     # ------------------------------------------------------------------
-    # Source records
+    # Source records — one path, used by both explorer and queue
     # ------------------------------------------------------------------
 
-    def clear_source_panel(self):
-        self.source_detail.clear()
-        self.source_button.setEnabled(getattr(self, "current_finding", None)
-                                       is not None)
-        self.source_button.setText("Load source records")
+    def load_finding_source_records(self):
+        self.load_source_into(self.finding_detail_panel)
 
-    def load_source_records(self):
+    def load_source_into(self, panel):
         """
-        Re-read the submitted records behind the selected finding.
+        Re-read the submitted records behind the panel's finding.
 
         Read back from the dataset rather than from anything the
         pipeline cached, so what a supervisor verifies is the submission
         itself.
         """
-        finding = getattr(self, "current_finding", None)
+        finding = panel.current_finding
         if finding is None:
             return
 
         dataset_path = self.session.dataset_path or self.dataset_path
-        self.source_button.setEnabled(False)
-        self.source_button.setText("Loading…")
+        panel.set_source_loading()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             bundle = self.evidence_service.bundle_for(finding, dataset_path)
         except SourceUnavailable as exc:
-            self.source_detail.setPlainText(
+            panel.set_source_text(
                 f"SOURCE RECORDS UNAVAILABLE\n{'─' * 46}\n{exc}\n\n"
                 "This does not mean the finding lacks evidence — the "
                 "evidence recorded by the rule is shown above. It means "
@@ -1896,10 +1763,8 @@ class MainWindow(QMainWindow):
             return
         finally:
             QApplication.restoreOverrideCursor()
-            self.source_button.setEnabled(True)
-            self.source_button.setText("Reload source records")
 
-        self.source_detail.setPlainText(self.format_source_bundle(bundle))
+        panel.set_source_text(self.format_source_bundle(bundle))
 
     @staticmethod
     def format_source_bundle(bundle: dict) -> str:
@@ -1934,7 +1799,7 @@ class MainWindow(QMainWindow):
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # AI explanation — structurally separate from the record above
+    # Narration lookup
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1966,69 +1831,43 @@ class MainWindow(QMainWindow):
                 return record
         return None
 
-    def show_ai_explanation(self, finding):
-        record = self.narration_for(finding)
-
-        if record is None:
-            self.ai_explanation_panel.hide()
-            self.ai_explanation_text.clear()
-            return
-
-        is_mock = bool(record.get("narration_is_mock"))
-        header = ("SAMPLE EXPLANATION — NO LANGUAGE MODEL"
-                  if is_mock else
-                  f"AI EXPLANATION — {record.get('narration_model', 'local model')}")
-
-        self.ai_explanation_header.setText(header)
-        self.ai_explanation_header.setProperty(
-            "state", "mock" if is_mock else "model")
-        self.ai_explanation_header.style().unpolish(self.ai_explanation_header)
-        self.ai_explanation_header.style().polish(self.ai_explanation_header)
-
-        provenance = record.get("narration_provenance", "")
-        self.ai_explanation_text.setPlainText(
-            record.get("narrated_explanation", ""))
-        self.ai_explanation_footer.setText(
-            (provenance + "\n\n" if provenance else "")
-            + "Supplementary only. The rule, rationale and evidence above "
-            "are the authoritative record and were produced without it.")
-
-        self.ai_explanation_panel.show()
-
     # ============================================================
     # REVIEW QUEUE
     # ============================================================
 
     def build_review_page(self):
+        """
+        The supervisory review queue, grouped into cases.
+
+        The engine correlates findings that share an alert into a case,
+        publishing case_rank, case_priority and case_finding_count for
+        exactly that purpose. Rendering the queue flat discarded it: on
+        the current data 81 findings correlate into 25 cases, and the
+        worst is a single alert acknowledged without investigation,
+        closed with templated notes, left with no evidence record, and
+        triaged late. Four rows in a flat list; one supervisory question
+        when grouped.
+        """
         page = QWidget()
-
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(
-            30,
-            25,
-            30,
-            25,
-        )
+        layout.setContentsMargins(30, 25, 30, 25)
 
-        title = QLabel(
-            "Supervisory Review Queue"
-        )
-        title.setObjectName(
-            "page_title"
-        )
-
+        title = QLabel("Supervisory Review Queue")
+        title.setObjectName("page_title")
         layout.addWidget(title)
 
         description = QLabel(
-            "Prioritized findings requiring human supervisory review."
+            "Where to spend manual review effort first. Findings that "
+            "share an alert are grouped into one case, ranked by the sum "
+            "of their priorities — the ranking is arithmetic and is shown "
+            "in full for every case."
         )
-        description.setObjectName(
-            "page_description"
-        )
-
+        description.setObjectName("page_description")
+        description.setWordWrap(True)
         layout.addWidget(description)
 
         page_layout = layout
+
         self.review_placeholder = QLabel("")
         self.review_placeholder.setObjectName("empty_state")
         self.review_placeholder.setAlignment(Qt.AlignCenter)
@@ -2040,206 +1879,229 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         page_layout.addWidget(self.review_content, 1)
 
+        # ---- Stats + filters ---------------------------------------
+        self.review_stats = QLabel("")
+        self.review_stats.setObjectName("caveat")
+        self.review_stats.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        layout.addWidget(self.review_stats)
+
+        filters = QHBoxLayout()
+        filters.setSpacing(8)
+
+        self.review_search = QLineEdit()
+        self.review_search.setPlaceholderText(
+            "Search entity, rule, alert, case, or rationale text…")
+        self.review_search.setClearButtonEnabled(True)
+        self.review_search.textChanged.connect(self.refresh_review_queue)
+        filters.addWidget(self.review_search, 1)
+
+        self.review_soc_filter = QComboBox()
+        self.review_soc_filter.addItem("All Entities")
+        self.review_severity_filter = QComboBox()
+        self.review_severity_filter.addItems(
+            ["All Severities", "CRITICAL", "HIGH", "MEDIUM", "LOW", "UNRATED"])
+
+        for widget in (self.review_soc_filter, self.review_severity_filter):
+            widget.setMinimumWidth(150)
+            widget.currentIndexChanged.connect(self.refresh_review_queue)
+            filters.addWidget(widget)
+
+        self.review_compound_only = QCheckBox("Compounding cases only")
+        self.review_compound_only.setToolTip(
+            "Show only cases where more than one finding landed on the "
+            "same alert.")
+        self.review_compound_only.toggled.connect(self.refresh_review_queue)
+        filters.addWidget(self.review_compound_only)
+
+        layout.addLayout(filters)
+
+        # ---- Cases | findings-in-case | detail ----------------------
+        splitter = QSplitter(Qt.Horizontal)
+
+        left = QSplitter(Qt.Vertical)
+
+        self.case_table = QTableWidget()
+        self.case_table.setColumnCount(7)
+        self.case_table.setHorizontalHeaderLabels(
+            ["Case", "Entity", "Severity", "Findings", "Case Priority",
+             "Alert", "What the case is"])
+        self.case_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.case_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.case_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.case_table.verticalHeader().setVisible(False)
+        self.case_table.horizontalHeader().setStretchLastSection(True)
+        self.case_table.itemSelectionChanged.connect(self.review_case_selected)
+        left.addWidget(self.case_table)
+
+        findings_host = QWidget()
+        findings_layout = QVBoxLayout(findings_host)
+        findings_layout.setContentsMargins(0, 6, 0, 0)
+        findings_layout.setSpacing(4)
+
+        self.case_findings_title = QLabel("Findings in the selected case")
+        self.case_findings_title.setObjectName("section_title")
+        findings_layout.addWidget(self.case_findings_title)
+
         self.review_table = QTableWidget()
-        self.review_table.setColumnCount(
-            9
-        )
-
+        self.review_table.setColumnCount(6)
         self.review_table.setHorizontalHeaderLabels(
-            [
-                "Queue",
-                "Severity",
-                "SOC",
-                "Finding",
-                "Rule",
-                "Alert",
-                "Case",
-                "Queue Priority",
-                "Case Priority",
-            ]
-        )
+            ["Queue", "Severity", "Finding", "Rule", "Case", "Priority"])
+        self.review_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.review_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.review_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.review_table.verticalHeader().setVisible(False)
+        self.review_table.horizontalHeader().setStretchLastSection(True)
+        self.review_table.itemSelectionChanged.connect(self.review_selected)
+        findings_layout.addWidget(self.review_table)
 
-        self.review_table.setEditTriggers(
-            QTableWidget.NoEditTriggers
-        )
+        left.addWidget(findings_host)
+        left.setSizes([340, 260])
+        splitter.addWidget(left)
 
-        self.review_table.setSelectionBehavior(
-            QTableWidget.SelectRows
-        )
+        self.review_detail_panel = FindingDetailPanel()
+        self.review_detail_panel.source_requested.connect(
+            self.load_review_source_records)
+        splitter.addWidget(self.review_detail_panel)
 
-        self.review_table.itemSelectionChanged.connect(
-            self.review_selected
-        )
-
-        layout.addWidget(
-            self.review_table
-        )
-
-        self.review_detail = QTextEdit()
-        self.review_detail.setReadOnly(
-            True
-        )
-
-        layout.addWidget(
-            self.review_detail
-        )
+        splitter.setSizes([760, 620])
+        layout.addWidget(splitter)
 
         return page
 
+    # ------------------------------------------------------------------
+    # Review queue behaviour
+    # ------------------------------------------------------------------
+
     def refresh_review_queue(self):
-        if not hasattr(
-            self,
-            "review_table",
-        ):
+        if not hasattr(self, "case_table"):
             return
 
-        self.review_table.setRowCount(
-            len(self.review_queue)
+        all_cases = review_service.build_cases(self.review_queue)
+
+        current = self.review_soc_filter.currentText()
+        entities = sorted({case.soc_id for case in all_cases if case.soc_id})
+        self.review_soc_filter.blockSignals(True)
+        self.review_soc_filter.clear()
+        self.review_soc_filter.addItem("All Entities")
+        self.review_soc_filter.addItems(entities)
+        index = self.review_soc_filter.findText(current)
+        self.review_soc_filter.setCurrentIndex(index if index >= 0 else 0)
+        self.review_soc_filter.blockSignals(False)
+
+        soc = self.review_soc_filter.currentText()
+        severity = self.review_severity_filter.currentText()
+
+        self.review_cases = review_service.filter_cases(
+            all_cases,
+            soc_id="" if soc == "All Entities" else soc,
+            severity="" if severity == "All Severities" else severity,
+            query=self.review_search.text(),
+            compound_only=self.review_compound_only.isChecked(),
         )
 
-        for row, item in enumerate(
-            self.review_queue
-        ):
-            values = [
-                item.get(
-                    "queue_rank",
-                    "N/A",
-                ),
-                item.get(
-                    "severity",
-                    "N/A",
-                ),
-                item.get(
-                    "soc_id",
-                    "N/A",
-                ),
-                item.get(
-                    "finding_type",
-                    "N/A",
-                ),
-                item.get(
-                    "rule_id",
-                    "N/A",
-                ),
-                item.get(
-                    "alert_id",
-                    "—",
-                ),
-                item.get(
-                    "case_id",
-                    "—",
-                ),
-                item.get(
-                    "queue_priority",
-                    "N/A",
-                ),
-                item.get(
-                    "case_priority",
-                    "N/A",
-                ),
+        stats = review_service.queue_statistics(all_cases)
+        self.review_stats.setText(
+            f"{stats['findings']} prioritised findings correlated into "
+            f"{stats['cases']} cases · {stats['compound_cases']} cases carry "
+            f"more than one finding · largest case holds "
+            f"{stats['largest_case']} · showing {len(self.review_cases)}"
+        )
+
+        self.case_table.setRowCount(len(self.review_cases))
+        for row, case in enumerate(self.review_cases):
+            cells = [
+                str(case.case_rank),
+                case.soc_id,
+                case.worst_severity,
+                f"{case.finding_count}",
+                f"{case.case_priority:g}",
+                case.alert_id or "—",
+                case.summary,
             ]
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if column == 2:
+                    item.setForeground(QColor(severity_color(case.worst_severity)))
+                if column == 3 and case.finding_count > 1:
+                    item.setForeground(QColor("#e8c07d"))
+                self.case_table.setItem(row, column, item)
+            self.case_table.item(row, 0).setData(Qt.UserRole, row)
 
-            for column, value in enumerate(
-                values
-            ):
-                self.review_table.setItem(
-                    row,
-                    column,
-                    QTableWidgetItem(
-                        str(value)
-                    ),
-                )
+        self.case_table.resizeColumnsToContents()
 
-            self.review_table.item(
-                row,
-                0,
-            ).setData(
-                Qt.UserRole,
-                item,
-            )
+        if self.review_cases:
+            if not self.case_table.selectedItems():
+                self.case_table.selectRow(0)
+            else:
+                self.review_case_selected()
+        else:
+            self.review_table.setRowCount(0)
+            self.case_findings_title.setText("No cases match the filters")
+            self.review_detail_panel.clear("No cases match the filters")
 
-        self.review_detail.setPlainText(
-            f"{len(self.review_queue)} item(s) "
-            "in supervisory review queue."
-        )
+    def selected_review_case(self):
+        items = self.case_table.selectedItems()
+        if not items:
+            return None
+        item = self.case_table.item(items[0].row(), 0)
+        index = item.data(Qt.UserRole) if item else None
+        if index is None or index >= len(self.review_cases):
+            return None
+        return self.review_cases[index]
+
+    def review_case_selected(self):
+        case = self.selected_review_case()
+        if case is None:
+            return
+
+        self.case_findings_title.setText(
+            f"Findings in case {case.case_rank} — {case.finding_count} "
+            f"finding(s) on alert {case.alert_id or '—'}"
+            if case.alert_id else
+            f"Findings in case {case.case_rank} — entity-level")
+
+        self.review_table.setRowCount(len(case.findings))
+        for row, finding in enumerate(case.findings):
+            severity = review_service.severity_of(finding)
+            cells = [
+                str(finding.get("queue_rank", "")),
+                severity,
+                str(finding.get("finding_type", "")),
+                str(finding.get("rule_id", "")),
+                str(finding.get("case_id") or "—"),
+                f"{float(finding.get('queue_priority', 0)):g}",
+            ]
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if column == 1:
+                    item.setForeground(QColor(severity_color(severity)))
+                self.review_table.setItem(row, column, item)
+            self.review_table.item(row, 0).setData(Qt.UserRole, finding)
+
+        self.review_table.resizeColumnsToContents()
+        self.review_table.selectRow(0)
 
     def review_selected(self):
         rows = self.review_table.selectedItems()
-
         if not rows:
             return
-
-        item = self.review_table.item(
-            rows[0].row(),
-            0,
-        )
-
-        review = item.data(
-            Qt.UserRole
-        )
-
-        if not review:
+        item = self.review_table.item(rows[0].row(), 0)
+        finding = item.data(Qt.UserRole) if item else None
+        if finding is None:
             return
 
-        evidence = review.get(
-            "evidence",
-            {},
-        )
+        case = self.selected_review_case()
+        extra = None
+        if case is not None:
+            extra = ("WHY THIS CASE IS PRIORITISED", case.why_prioritised())
 
-        text = [
-            "SUPERVISORY REVIEW ITEM",
-            "════════════════════════",
-            "",
-            f"Queue Rank: {review.get('queue_rank', 'N/A')}",
-            f"Case Rank: {review.get('case_rank', 'N/A')}",
-            f"SOC: {review.get('soc_id', 'N/A')}",
-            f"Severity: {review.get('severity', 'N/A')}",
-            f"Finding: {review.get('finding_type', 'N/A')}",
-            f"Rule: {review.get('rule_id', 'N/A')}",
-            f"Alert: {review.get('alert_id', 'N/A')}",
-            f"Case: {review.get('case_id', 'N/A')}",
-            f"Analyst: {review.get('assigned_analyst_id', 'N/A')}",
-            "",
-            f"Finding Weight: {review.get('finding_weight', 'N/A')}",
-            f"Severity Boost: {review.get('severity_boost', 'N/A')}",
-            f"Queue Priority: {review.get('queue_priority', 'N/A')}",
-            f"Case Priority: {review.get('case_priority', 'N/A')}",
-            f"Case Finding Count: {review.get('case_finding_count', 'N/A')}",
-            "",
-            "RATIONALE",
-            "────────────",
-            review.get(
-                "rationale",
-                "Unavailable",
-            ),
-            "",
-            "EVIDENCE",
-            "────────────",
-            json.dumps(
-                evidence,
-                indent=2,
-            ),
-        ]
+        self.review_detail_panel.show_finding(
+            finding, self.assessment_config(),
+            narration=self.narration_for(finding),
+            extra_section=extra)
 
-        record = self.narration_for(review)
-        if record is not None:
-            is_mock = bool(record.get("narration_is_mock"))
-            text += [
-                "",
-                ("SAMPLE EXPLANATION — NO LANGUAGE MODEL" if is_mock
-                 else f"AI EXPLANATION — {record.get('narration_model', '')}"),
-                "─" * 12,
-                record.get("narrated_explanation", ""),
-                "",
-                record.get("narration_provenance", ""),
-                "",
-                "Supplementary only. The rule, rationale and evidence "
-                "above are the authoritative record.",
-            ]
-
-        self.review_detail.setPlainText(
-            "\n".join(text)
-        )
+    def load_review_source_records(self):
+        self.load_source_into(self.review_detail_panel)
 
     # ============================================================
     # REPORTS

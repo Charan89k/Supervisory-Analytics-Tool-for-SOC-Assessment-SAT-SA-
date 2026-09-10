@@ -14,9 +14,17 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-#: rule_id -> (finding_type, what it tests, config keys it reads)
+#: The two supervisory categories a rule belongs to. Held here because
+#: this is already the authoritative rule catalogue, and because a
+#: review-queue record does not carry the category the findings list
+#: attaches — deriving it from the rule keeps both views consistent.
+EXECUTION_GAP = "Execution Gap"
+NEGATIVE_SPACE = "Negative Space"
+
+#: rule_id -> (finding_type, category, what it tests, config keys it reads)
 RULES: Dict[str, dict] = {
     "ESC-REQUIRED-001": {
+        "category": EXECUTION_GAP,
         "finding_type": "MISSED_ESCALATION",
         "checks": (
             "An alert whose escalation record says escalation was "
@@ -25,6 +33,7 @@ RULES: Dict[str, dict] = {
         "config": ["escalation.required_severities"],
     },
     "ACK-SLA-001": {
+        "category": EXECUTION_GAP,
         "finding_type": "SLOW_TRIAGE",
         "checks": (
             "Time from alert creation to acknowledgement, against a "
@@ -34,6 +43,7 @@ RULES: Dict[str, dict] = {
                     "execution_gaps.slow_triage_sla_multiplier"],
     },
     "TRIAGE-FAST-001": {
+        "category": EXECUTION_GAP,
         "finding_type": "FAST_CLOSURE",
         "checks": (
             "Investigation duration on a HIGH/CRITICAL alert against a "
@@ -46,6 +56,7 @@ RULES: Dict[str, dict] = {
                     "execution_gaps.fast_closure_min_margin_minutes"],
     },
     "EVIDENCE-REQUIRED-001": {
+        "category": EXECUTION_GAP,
         "finding_type": "MISSING_EVIDENCE",
         "checks": (
             "A HIGH/CRITICAL alert closed with no evidence record "
@@ -55,11 +66,13 @@ RULES: Dict[str, dict] = {
         "config": [],
     },
     "REOPEN-001": {
+        "category": EXECUTION_GAP,
         "finding_type": "REOPENED_CASE",
         "checks": "A REOPENED event present in the alert lifecycle trail.",
         "config": [],
     },
     "TEMPLATE-INVESTIGATION-001": {
+        "category": EXECUTION_GAP,
         "finding_type": "REPETITIVE_INVESTIGATION",
         "checks": (
             "Byte-identical investigation note text repeated across "
@@ -70,6 +83,7 @@ RULES: Dict[str, dict] = {
         "config": ["execution_gaps.repetitive_investigation_min_occurrences"],
     },
     "WORKLOAD-ZSCORE-001": {
+        "category": EXECUTION_GAP,
         "finding_type": "ANALYST_OVERLOAD",
         "checks": (
             "An analyst's alert volume as a z-score against peers in "
@@ -78,6 +92,7 @@ RULES: Dict[str, dict] = {
         "config": ["execution_gaps.analyst_overload_zscore_threshold"],
     },
     "INVESTIGATION-ABSENT-001": {
+        "category": EXECUTION_GAP,
         "finding_type": "ACK_WITHOUT_INVESTIGATION",
         "checks": (
             "An alert acknowledged and later closed with no "
@@ -87,6 +102,7 @@ RULES: Dict[str, dict] = {
         "config": ["execution_gaps.ack_without_investigation_severities"],
     },
     "ROOT-CAUSE-RECURRENCE-001": {
+        "category": EXECUTION_GAP,
         "finding_type": "REPEATED_ALERT_WITHOUT_REMEDIATION",
         "checks": (
             "Repeated alerts of one category on one asset where no case "
@@ -97,6 +113,7 @@ RULES: Dict[str, dict] = {
                     "execution_gaps.repeated_alert_remediation_keywords"],
     },
     "TELEMETRY-COVERAGE-001": {
+        "category": NEGATIVE_SPACE,
         "finding_type": "TELEMETRY_GAP",
         "checks": (
             "An expected telemetry source whose reported coverage is "
@@ -105,6 +122,7 @@ RULES: Dict[str, dict] = {
         "config": ["negative_space.min_expected_coverage_pct"],
     },
     "CATEGORY-PEER-COVERAGE-001": {
+        "category": NEGATIVE_SPACE,
         "finding_type": "MISSING_ALERT_CATEGORY",
         "checks": (
             "An alert category present for a strong majority of peer "
@@ -113,6 +131,7 @@ RULES: Dict[str, dict] = {
         "config": ["negative_space.missing_category_peer_presence_fraction"],
     },
     "VOLUME-ZSCORE-001": {
+        "category": NEGATIVE_SPACE,
         "finding_type": "LOW_ACTIVITY_OUTLIER",
         "checks": (
             "Entity alert volume as a z-score below the peer mean."
@@ -120,6 +139,7 @@ RULES: Dict[str, dict] = {
         "config": ["negative_space.low_activity_zscore_threshold"],
     },
     "ESCALATION-RECORDKEEPING-001": {
+        "category": NEGATIVE_SPACE,
         "finding_type": "MISSING_ESCALATION_RECORDS",
         "checks": (
             "The fraction of an entity's HIGH/CRITICAL alerts carrying "
@@ -130,6 +150,7 @@ RULES: Dict[str, dict] = {
                     "negative_space.escalation_record_min_high_crit_alerts"],
     },
     "INVESTIGATION-RECORDKEEPING-001": {
+        "category": NEGATIVE_SPACE,
         "finding_type": "MISSING_INVESTIGATIONS",
         "checks": (
             "The fraction of an entity's cases with no investigation "
@@ -170,6 +191,19 @@ def describe(rule_id: str, config: dict) -> dict:
 
     return {
         "finding_type": entry["finding_type"],
+        "category": entry["category"],
         "checks": entry["checks"],
         "thresholds": thresholds,
     }
+
+
+def category_for(rule_id: str) -> str:
+    """
+    Which supervisory category a rule belongs to.
+
+    Returns "" for an unknown rule rather than guessing — the detail
+    panel omits the row instead of printing a category it cannot
+    substantiate.
+    """
+    entry = RULES.get(str(rule_id))
+    return entry["category"] if entry else ""
