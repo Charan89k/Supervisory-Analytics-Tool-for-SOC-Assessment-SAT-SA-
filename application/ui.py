@@ -2646,6 +2646,48 @@ class MainWindow(QMainWindow):
                 color: #7d8899;
                 border-left: 3px solid #3d4b5f;
             }
+            /* Scroll areas default to a warm neutral #323232 viewport,
+               which reads as a brown panel sitting on the cool blue-black
+               page. Both the viewport and the widget inside it have to be
+               cleared, not just the frame. */
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea > QWidget > QWidget {
+                background: transparent;
+            }
+            QScrollArea > QWidget > QScrollBar {
+                background: #131a24;
+            }
+            QScrollBar:vertical {
+                background: #0f151d;
+                width: 11px;
+                margin: 0;
+                border: none;
+            }
+            QScrollBar::handle:vertical {
+                background: #2b3648;
+                min-height: 28px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover { background: #3b4a63; }
+            QScrollBar:horizontal {
+                background: #0f151d;
+                height: 11px;
+                margin: 0;
+                border: none;
+            }
+            QScrollBar::handle:horizontal {
+                background: #2b3648;
+                min-width: 28px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:horizontal:hover { background: #3b4a63; }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                width: 0; height: 0; border: none; background: none;
+            }
+            QScrollBar::add-page, QScrollBar::sub-page { background: none; }
             QLabel#section_subtitle {
                 color: #7d8899;
                 font-size: 11px;
@@ -3018,16 +3060,6 @@ class MainWindow(QMainWindow):
 
             #report_row QPushButton:hover {
                 background: #243448;
-            }
-
-            QScrollBar:vertical {
-                background: #0d1219;
-                width: 10px;
-            }
-
-            QScrollBar::handle:vertical {
-                background: #354354;
-                border-radius: 5px;
             }
             """
         )
