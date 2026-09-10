@@ -28,6 +28,17 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+#: The distinct states the UI must be able to show. "Not configured"
+#: is deliberately separate from "unavailable": an operator who has not
+#: yet pointed SAT-SA at a model file needs different guidance from one
+#: whose configured model has gone missing.
+STATE_DISABLED = "disabled"
+STATE_NOT_CONFIGURED = "not_configured"
+STATE_UNAVAILABLE = "unavailable"
+STATE_AVAILABLE = "available"
+STATE_MOCK = "mock"
+
+
 @dataclass(frozen=True)
 class BackendStatus:
     """The answer to 'is the local AI usable right now?'"""
@@ -39,13 +50,33 @@ class BackendStatus:
     detail: str = ""
     #: True when this backend does not run a real language model.
     is_mock: bool = False
+    #: One of the STATE_* constants above.
+    state: str = ""
+
+    def resolved_state(self) -> str:
+        if self.state:
+            return self.state
+        if self.is_mock:
+            return STATE_MOCK
+        return STATE_AVAILABLE if self.available else STATE_UNAVAILABLE
+
+    def headline(self) -> str:
+        """Short form for a status tile."""
+        return {
+            STATE_DISABLED: "AI DISABLED",
+            STATE_NOT_CONFIGURED: "AI NOT CONFIGURED",
+            STATE_UNAVAILABLE: "AI UNAVAILABLE",
+            STATE_MOCK: "SAMPLE EXPLANATIONS",
+            STATE_AVAILABLE: "AI AVAILABLE",
+        }[self.resolved_state()]
 
     def label(self) -> str:
-        if self.is_mock:
+        state = self.resolved_state()
+        if state == STATE_MOCK:
             return f"SAMPLE EXPLANATIONS (no model) — {self.detail}"
-        if self.available:
+        if state == STATE_AVAILABLE:
             return f"AI AVAILABLE — {self.backend}: {self.model}"
-        return f"AI UNAVAILABLE — {self.detail}"
+        return f"{self.headline()} — {self.detail}"
 
 
 @dataclass(frozen=True)

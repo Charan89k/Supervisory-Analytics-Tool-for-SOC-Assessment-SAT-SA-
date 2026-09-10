@@ -27,6 +27,8 @@ import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["SATSA_NARRATION_BACKEND"] = "mock"
+# Never read or write the developer's real settings file.
+os.environ["SATSA_CONFIG_DIR"] = tempfile.mkdtemp(prefix="satsa-smoke-config-")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -101,8 +103,8 @@ def main():
     window.show()
 
     print("\n[1] Window construction")
-    assert window.pages.count() == 5
-    ok("five pages present")
+    assert window.pages.count() == 6
+    ok("six pages present (Dashboard, Assessment, Findings, Queue, Reports, Settings)")
     assert not window.run_button.isEnabled()
     ok("RUN disabled until a dataset validates")
 
@@ -138,7 +140,7 @@ def main():
     print("\n[5] Assessment run")
     window.drop_zone.set_dataset(DATA)
     assert pump(lambda: not window.validation_busy)
-    window.ai_mode.setCurrentIndex(window.ai_mode.count() - 1)  # no AI
+    window.ai_enabled_box.setChecked(False)   # deterministic-only run
     window.start_assessment()
     assert pump(lambda: not window.assessment_busy), "assessment hung"
     assert window.current_result is not None
@@ -191,7 +193,118 @@ def main():
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 
-    print("\n[10] No language model was involved")
+    print("\n[10] AI status states")
+    from application.services.ai_config import AIConfig
+
+    # The mock override is lifted for this section ONLY, so the UI is
+    # exercised against real backend selection. This loads no model:
+    # LlamaCppBackend.probe() imports the library and stats a file, and
+    # OllamaBackend.probe() is one HTTP GET to loopback against a 2s
+    # timeout. Neither reads model weights. It is restored afterwards so
+    # every explanation generated below still comes from the mock.
+    forced_backend = os.environ.pop("SATSA_NARRATION_BACKEND")
+
+    window.ai_settings_saved(AIConfig(enabled=False))
+    assert window.sidebar_ai_status.text() == "AI DISABLED"
+    ok("disabled  -> 'AI DISABLED'")
+
+    window.ai_settings_saved(AIConfig(enabled=True, backend="llamacpp",
+                                       model_path=""))
+    assert window.sidebar_ai_status.text() == "AI NOT CONFIGURED"
+    ok("llama.cpp with no model file -> 'AI NOT CONFIGURED'")
+
+    window.ai_settings_saved(AIConfig(enabled=True, backend="ollama",
+                                       model="qwen2.5:7b",
+                                       availability_timeout=2))
+    assert window.sidebar_ai_status.text() in (
+        "AI UNAVAILABLE", "AI AVAILABLE"), window.sidebar_ai_status.text()
+    ok(f"ollama probe -> {window.sidebar_ai_status.text()!r} (no model loaded)")
+
+    os.environ["SATSA_NARRATION_BACKEND"] = forced_backend
+
+    window.ai_settings_saved(AIConfig(enabled=True, backend="mock"))
+    assert window.sidebar_ai_status.text() == "SAMPLE EXPLANATIONS"
+    ok("mock -> 'SAMPLE EXPLANATIONS'")
+
+    print("\n[11] Explanations run after an assessment, bounded by scope")
+    window.ai_config.max_explanations = 5
+    window.drop_zone.set_dataset(DATA)
+    assert pump(lambda: not window.validation_busy)
+    window.ai_enabled_box.setChecked(True)
+    window.start_assessment()
+    assert pump(lambda: not window.assessment_busy), "assessment hung"
+    assert pump(lambda: not window.narration_busy), "narration hung"
+
+    outcome = window.narration_outcome
+    assert outcome is not None, "narration never ran"
+    assert outcome.explained == 5, outcome.explained
+    ok(f"{outcome.explained} of {outcome.considered} queue items explained "
+       f"(from {len(window.findings)} findings)")
+
+    explained = [r for r in window.review_queue
+                 if r.get("narration_source") == "mock"]
+    assert len(explained) == 5
+    assert all(r["narration_is_mock"] for r in explained)
+    ok("explanations tagged is_mock and stored separately from evidence")
+
+    untouched = [r for r in window.review_queue
+                 if r.get("narration_source") == "rule"]
+    assert len(untouched) == len(window.review_queue) - 5
+    ok(f"{len(untouched)} out-of-scope items kept their rule rationale")
+
+    print("\n[12] Deterministic result is unchanged by narration")
+    assert window.risk_table.rowCount() == 5
+    assert len(window.findings) == 1479
+    for record in window.review_queue:
+        assert record["severity"] in ("CRITICAL", "HIGH")
+        assert record["evidence"] is not None
+    ok("entity ranking, findings, severities and evidence all intact")
+
+    print("\n[13] Explanation surfaces in the detail panel, labelled")
+    window.review_table.selectRow(0)
+    detail = window.review_detail.toPlainText()
+    assert "SAMPLE EXPLANATION (NO MODEL)" in detail, detail[:200]
+    assert "no language model" in detail.lower()
+    assert "authoritative record" in detail
+    ok("detail panel shows the sample label and the authoritative-record note")
+
+    print("\n[14] Cancellation")
+    from application.narration_worker import NarrationWorker
+    from application.services.ai_config import AIConfig as _AIConfig
+    queue = [dict(r) for r in window.review_queue]
+    for record in queue:
+        record.pop("narration_source", None)
+        record.pop("narrated_explanation", None)
+    worker = NarrationWorker(queue, _AIConfig(enabled=True, backend="mock",
+                                               max_explanations=50))
+    seen = []
+    worker.progress.connect(lambda d, t: (seen.append(d),
+                                           worker.cancel() if d >= 3 else None))
+    worker.run()
+    assert worker._cancelled is True
+    explained_after_cancel = sum(
+        1 for r in queue if r.get("narration_source") == "mock")
+    assert 0 < explained_after_cancel < 50, explained_after_cancel
+    ok(f"cancelled after {explained_after_cancel} explanations; "
+       f"partial results kept")
+
+    print("\n[15] AI failure never fails the assessment")
+    forced_backend = os.environ.pop("SATSA_NARRATION_BACKEND")
+    window.ai_settings_saved(AIConfig(enabled=True, backend="llamacpp",
+                                       model_path="/nonexistent/model.gguf"))
+    window.drop_zone.set_dataset(DATA)
+    assert pump(lambda: not window.validation_busy)
+    window.start_assessment()
+    assert pump(lambda: not window.assessment_busy)
+    assert window.current_result is not None
+    assert window.risk_table.rowCount() == 5
+    assert not window.narration_busy
+    log = window.assessment_log.toPlainText()
+    assert "skipped" in log.lower(), log[-300:]
+    ok("assessment completed with an unavailable model; skip was reported")
+    os.environ["SATSA_NARRATION_BACKEND"] = forced_backend
+
+    print("\n[16] No language model was involved")
     from analytics.narration import resolve_backend_name
     assert resolve_backend_name({}) == "mock"
     ok("narration backend resolved to 'mock' throughout")

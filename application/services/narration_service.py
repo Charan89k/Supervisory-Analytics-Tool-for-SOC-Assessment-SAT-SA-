@@ -11,7 +11,12 @@ would eventually disagree.
 from typing import Callable, List, Optional
 
 from analytics.narration import create_backend
-from analytics.narration.base import BackendStatus, LocalLLMBackend
+from analytics.narration.base import (
+    STATE_DISABLED,
+    STATE_UNAVAILABLE,
+    BackendStatus,
+    LocalLLMBackend,
+)
 from analytics.narration.service import (
     NarrationOutcome,
     NarrationScope,
@@ -50,11 +55,14 @@ class NarrationService:
         missing model shows as "AI unavailable" rather than a freeze.
         """
         if not self.config.enabled:
+            # Returns before touching the backend: a disabled AI must
+            # cost nothing — no port opened, no file stat, no model load.
             return BackendStatus(
                 available=False,
                 backend=self.config.backend,
                 model=self.config.model,
                 detail="AI explanations are turned off",
+                state=STATE_DISABLED,
             )
         try:
             return self.backend.probe()
@@ -64,6 +72,7 @@ class NarrationService:
                 backend=self.config.backend,
                 model=self.config.model,
                 detail=f"backend error: {exc}",
+                state=STATE_UNAVAILABLE,
             )
 
     def scope(self) -> NarrationScope:

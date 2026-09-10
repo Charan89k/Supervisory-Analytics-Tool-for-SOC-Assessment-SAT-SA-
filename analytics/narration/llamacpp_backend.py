@@ -25,6 +25,8 @@ import os
 from typing import Optional
 
 from analytics.narration.base import (
+    STATE_NOT_CONFIGURED,
+    STATE_UNAVAILABLE,
     BackendStatus,
     LocalLLMBackend,
     NarrationResult,
@@ -56,20 +58,25 @@ class LlamaCppBackend(LocalLLMBackend):
         which is not acceptable for a status indicator that refreshes
         in the UI.
         """
-        unavailable = lambda detail: BackendStatus(  # noqa: E731
-            available=False, backend=self.name, model=self.model, detail=detail)
+        def status(detail, state=STATE_UNAVAILABLE):
+            return BackendStatus(available=False, backend=self.name,
+                                  model=self.model, detail=detail, state=state)
 
         try:
             import llama_cpp  # noqa: F401
         except ImportError:
-            return unavailable(
-                "llama-cpp-python is not installed in this environment")
+            return status(
+                "llama-cpp-python is not installed in this environment",
+                STATE_NOT_CONFIGURED)
 
         if not self.model_path:
-            return unavailable("no local model path is configured")
+            return status(
+                "no local model file has been selected yet",
+                STATE_NOT_CONFIGURED)
 
         if not os.path.isfile(self.model_path):
-            return unavailable(f"no model file at {self.model_path}")
+            return status(f"the configured model file is missing: "
+                          f"{self.model_path}")
 
         size_gb = os.path.getsize(self.model_path) / 1e9
         return BackendStatus(

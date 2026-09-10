@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt, QThread, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -26,9 +28,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from analytics.narration.base import STATE_DISABLED, BackendStatus
+from application.narration_worker import NarrationWorker
+from application.pages.settings_page import SettingsPage
+from application.services.narration_service import NarrationService
+from application.services.settings_service import SettingsService
 from application.widgets.drop_zone import DropZone
 from application.worker import AssessmentWorker, ValidationWorker
-from application.services.ai_config import create_ai_config
+from application.services.ai_config import AIConfig, create_ai_config
 
 
 class MainWindow(QMainWindow):
@@ -72,6 +79,14 @@ class MainWindow(QMainWindow):
         self.validation_worker = None
         self.validation_busy = False
         self.current_validation_report = None
+
+        self.narration_thread = None
+        self.narration_worker = None
+        self.narration_busy = False
+        self.narration_outcome = None
+
+        self.settings_service = SettingsService()
+        self.ai_config = self.settings_service.load_ai_config()
 
         self.findings = []
         self.review_queue = []
@@ -122,14 +137,22 @@ class MainWindow(QMainWindow):
         self.findings_button = self.make_nav_button("Findings")
         self.review_button = self.make_nav_button("Review Queue")
         self.reports_button = self.make_nav_button("Reports")
+        self.settings_button = self.make_nav_button("Settings")
 
         sidebar_layout.addWidget(self.dashboard_button)
         sidebar_layout.addWidget(self.new_assessment_button)
         sidebar_layout.addWidget(self.findings_button)
         sidebar_layout.addWidget(self.review_button)
         sidebar_layout.addWidget(self.reports_button)
+        sidebar_layout.addWidget(self.settings_button)
 
         sidebar_layout.addStretch()
+
+        self.sidebar_ai_status = QLabel("AI: checking…")
+        self.sidebar_ai_status.setObjectName("ai_status")
+        self.sidebar_ai_status.setWordWrap(True)
+        self.sidebar_ai_status.setAlignment(Qt.AlignCenter)
+        sidebar_layout.addWidget(self.sidebar_ai_status)
 
         status_label = QLabel("OFFLINE / AIR-GAPPED")
         status_label.setObjectName("offline_status")
@@ -148,12 +171,15 @@ class MainWindow(QMainWindow):
         self.findings_page = self.build_findings_page()
         self.review_page = self.build_review_page()
         self.reports_page = self.build_reports_page()
+        self.settings_page = SettingsPage(self.ai_config)
+        self.settings_page.settings_saved.connect(self.ai_settings_saved)
 
         self.pages.addWidget(self.dashboard_page)
         self.pages.addWidget(self.assessment_page)
         self.pages.addWidget(self.findings_page)
         self.pages.addWidget(self.review_page)
         self.pages.addWidget(self.reports_page)
+        self.pages.addWidget(self.settings_page)
 
         root_layout.addWidget(sidebar)
         root_layout.addWidget(self.pages)
@@ -174,8 +200,12 @@ class MainWindow(QMainWindow):
         self.reports_button.clicked.connect(
             lambda: self.show_page(4)
         )
+        self.settings_button.clicked.connect(
+            lambda: self.show_page(5)
+        )
 
         self.show_page(0)
+        self.refresh_ai_status()
 
     # ============================================================
     # NOTIFICATIONS
@@ -215,6 +245,7 @@ class MainWindow(QMainWindow):
             self.findings_button,
             self.review_button,
             self.reports_button,
+            self.settings_button,
         ]
 
         for i, button in enumerate(buttons):
@@ -283,11 +314,17 @@ class MainWindow(QMainWindow):
             "0",
         )
 
+        self.kpi_explained = self.make_kpi_card(
+            "AI Explained",
+            "0",
+        )
+
         kpi_layout.addWidget(self.kpi_socs)
         kpi_layout.addWidget(self.kpi_findings)
         kpi_layout.addWidget(self.kpi_execution)
         kpi_layout.addWidget(self.kpi_negative)
         kpi_layout.addWidget(self.kpi_review)
+        kpi_layout.addWidget(self.kpi_explained)
 
         layout.addLayout(kpi_layout)
 
@@ -402,22 +439,50 @@ class MainWindow(QMainWindow):
         self.validation_detail.hide()
         layout.addWidget(self.validation_detail)
 
-        ai_title = QLabel("Explanation Engine")
+        # ---- AI explanations --------------------------------------
+        # This used to be a model-picker combo that was wired to nothing
+        # at all: it built a config, handed it to the worker, and the
+        # worker handed it straight back unused. Model choice now lives
+        # in Settings; what belongs on this page is the one decision
+        # relevant to the run about to start.
+        ai_title = QLabel("AI Explanations")
         ai_title.setObjectName("section_title")
-
         layout.addWidget(ai_title)
 
-        self.ai_mode = QComboBox()
-        self.ai_mode.addItems(
-            [
-                "Fast — Qwen 2.5 3B",
-                "Balanced — Qwen 2.5 7B",
-                "Deep — Qwen 2.5 14B",
-                "Deterministic Only — No AI",
-            ]
-        )
+        ai_row = QHBoxLayout()
 
-        layout.addWidget(self.ai_mode)
+        self.ai_enabled_box = QCheckBox(
+            "Explain top review-queue findings after the assessment"
+        )
+        self.ai_enabled_box.setChecked(self.ai_config.enabled)
+        self.ai_enabled_box.toggled.connect(self.ai_toggle_changed)
+        ai_row.addWidget(self.ai_enabled_box)
+
+        ai_row.addStretch()
+
+        self.ai_settings_button = QPushButton("AI Settings…")
+        self.ai_settings_button.setCursor(Qt.PointingHandCursor)
+        self.ai_settings_button.clicked.connect(lambda: self.show_page(5))
+        ai_row.addWidget(self.ai_settings_button)
+
+        layout.addLayout(ai_row)
+
+        self.ai_status_label = QLabel("")
+        self.ai_status_label.setObjectName("ai_status")
+        self.ai_status_label.setWordWrap(True)
+        layout.addWidget(self.ai_status_label)
+
+        self.narration_progress = QProgressBar()
+        self.narration_progress.setObjectName("narration_progress")
+        self.narration_progress.setTextVisible(True)
+        self.narration_progress.hide()
+        layout.addWidget(self.narration_progress)
+
+        self.cancel_narration_button = QPushButton("Cancel Explanations")
+        self.cancel_narration_button.setCursor(Qt.PointingHandCursor)
+        self.cancel_narration_button.clicked.connect(self.cancel_narration)
+        self.cancel_narration_button.hide()
+        layout.addWidget(self.cancel_narration_button)
 
         self.run_button = QPushButton(
             "RUN ASSESSMENT"
@@ -589,29 +654,10 @@ class MainWindow(QMainWindow):
             )
             return
 
-        mode_index = self.ai_mode.currentIndex()
-
-        if mode_index == 0:
-            ai_config = create_ai_config(
-                mode="fast",
-                enabled=True,
-            )
-        elif mode_index == 1:
-            ai_config = create_ai_config(
-                mode="balanced",
-                enabled=True,
-            )
-        elif mode_index == 2:
-            ai_config = create_ai_config(
-                mode="deep",
-                enabled=True,
-            )
-        else:
-            ai_config = create_ai_config(
-                mode="balanced",
-                enabled=False,
-            )
-
+        # The deterministic assessment never consults this; it is carried
+        # so the narration step that follows knows what the supervisor
+        # asked for.
+        ai_config = self.ai_config
         self.current_ai_config = ai_config
 
         self.assessment_busy = True
@@ -720,6 +766,10 @@ class MainWindow(QMainWindow):
 
         self.show_page(0)
 
+        # Narration runs only after the assessment is complete and its
+        # outputs are on disk. Nothing it does can change them.
+        self.maybe_start_narration()
+
         # self.thread / self.worker are deliberately left set. Qt owns
         # their teardown via deleteLater; assessment_busy is what gates
         # the next run.
@@ -757,6 +807,166 @@ class MainWindow(QMainWindow):
             "Dataset Validation Failed",
             "The assessment did not run because the dataset failed "
             "validation.\n\n" + self.format_validation_issues(report),
+        )
+
+    # ============================================================
+    # AI EXPLANATIONS
+    # ============================================================
+
+    def ai_settings_saved(self, config):
+        """Settings page committed a new AI configuration."""
+        self.ai_config = config
+        self.settings_service.save_ai_config(config)
+
+        self.ai_enabled_box.blockSignals(True)
+        self.ai_enabled_box.setChecked(config.enabled)
+        self.ai_enabled_box.blockSignals(False)
+
+        self.refresh_ai_status()
+        self.notify(
+            "info",
+            "Settings Saved",
+            f"AI settings saved to:\n{self.settings_service.path}",
+        )
+
+    def ai_toggle_changed(self, enabled):
+        """The checkbox on the assessment page mirrors the stored config."""
+        self.ai_config.enabled = enabled
+        self.settings_service.save_ai_config(self.ai_config)
+        self.settings_page.load_from(self.ai_config)
+        self.refresh_ai_status()
+
+    def current_ai_status(self) -> BackendStatus:
+        return NarrationService(config=self.ai_config).status()
+
+    def refresh_ai_status(self):
+        """
+        Probe the configured backend and show the result.
+
+        Cheap by construction: probe() checks for a file or pings a
+        loopback port against a short timeout of its own. It never loads
+        a model, so this is safe to call whenever settings change.
+        """
+        status = self.current_ai_status()
+
+        for label in (self.ai_status_label, self.sidebar_ai_status):
+            label.setProperty("state", status.resolved_state())
+            label.style().unpolish(label)
+            label.style().polish(label)
+
+        self.ai_status_label.setText(status.label())
+        self.sidebar_ai_status.setText(status.headline())
+
+        return status
+
+    def maybe_start_narration(self):
+        """
+        Run the explanation pass, if the supervisor asked for one and a
+        backend is actually usable.
+
+        Called only after the assessment has completed and its outputs
+        are already written to disk, so nothing that happens here can
+        affect the assessment's result.
+        """
+        if not self.ai_config.enabled:
+            return
+
+        status = self.refresh_ai_status()
+        if not status.available:
+            self.assessment_log.append(
+                f"\u26a0 AI explanations skipped — {status.detail}. "
+                "Every finding keeps its rule-generated rationale."
+            )
+            return
+
+        if not self.review_queue:
+            return
+
+        self.narration_busy = True
+        self.narration_progress.setValue(0)
+        self.narration_progress.setMaximum(
+            min(self.ai_config.max_explanations, len(self.review_queue)))
+        self.narration_progress.setFormat("Explaining %v of %m findings…")
+        self.narration_progress.show()
+        self.cancel_narration_button.setEnabled(True)
+        self.cancel_narration_button.show()
+
+        self.narration_thread = QThread()
+        self.narration_worker = NarrationWorker(
+            self.review_queue, self.ai_config)
+        self.narration_worker.moveToThread(self.narration_thread)
+
+        self.narration_thread.started.connect(self.narration_worker.run)
+        self.narration_worker.progress.connect(self.narration_progress_update)
+        self.narration_worker.finished.connect(self.narration_finished)
+        self.narration_worker.failed.connect(self.narration_failed)
+
+        self.narration_worker.finished.connect(self.narration_thread.quit)
+        self.narration_worker.failed.connect(self.narration_thread.quit)
+        self.narration_thread.finished.connect(
+            self.narration_worker.deleteLater)
+        self.narration_thread.finished.connect(
+            self.narration_thread.deleteLater)
+
+        self.narration_thread.start()
+
+    def narration_progress_update(self, done, total):
+        self.narration_progress.setMaximum(total)
+        self.narration_progress.setValue(done)
+
+    def cancel_narration(self):
+        """
+        Ask the worker to stop after the explanation in flight.
+
+        The worker is not killed: a backend call is a blocking network
+        or inference call, and interrupting it mid-flight would leave a
+        half-written record. It checks the flag between findings, so a
+        cancel lands within one explanation.
+        """
+        if self.narration_worker is not None:
+            self.narration_worker.cancel()
+            self.cancel_narration_button.setEnabled(False)
+            self.cancel_narration_button.setText("Cancelling…")
+            self.assessment_log.append(
+                "\u2026 Cancelling explanations after the current finding."
+            )
+
+    def narration_finished(self, outcome):
+        self.narration_busy = False
+        self.narration_outcome = outcome
+
+        self.narration_progress.hide()
+        self.cancel_narration_button.hide()
+        self.cancel_narration_button.setText("Cancel Explanations")
+        self.cancel_narration_button.setEnabled(True)
+
+        self.assessment_log.append(f"\u2713 {outcome.summary()}")
+
+        # The explanations were written onto the review-queue records in
+        # place; re-render whatever is showing them.
+        self.refresh_review_queue()
+        self.refresh_findings()
+        self.refresh_dashboard()
+
+    def narration_failed(self, message):
+        self.narration_busy = False
+
+        self.narration_progress.hide()
+        self.cancel_narration_button.hide()
+
+        # The assessment is already complete and saved. A narration
+        # failure is reported, never escalated into an assessment
+        # failure.
+        self.assessment_log.append(
+            f"\u26a0 AI explanations failed: {message}. "
+            "The assessment itself is unaffected."
+        )
+        self.notify(
+            "warning",
+            "AI Explanations Failed",
+            f"{message}\n\nThe deterministic assessment completed "
+            "normally and all findings keep their rule-generated "
+            "rationale.",
         )
 
     def assessment_failed(self, message):
@@ -1162,6 +1372,59 @@ class MainWindow(QMainWindow):
             finding
         )
 
+    @staticmethod
+    def narration_key(record):
+        """Identity shared between a finding and its review-queue row."""
+        return (
+            str(record.get("soc_id")),
+            str(record.get("finding_type")),
+            str(record.get("rule_id")),
+            str(record.get("alert_id")),
+            str(record.get("case_id")),
+        )
+
+    def narration_for(self, finding):
+        """
+        The explanation for this finding, if one was generated.
+
+        Findings and review-queue rows are separate objects describing
+        the same underlying finding, so they are matched on identity
+        rather than by mutating one from the other. Returns None when
+        the finding was outside the explanation scope, which is the
+        normal case for most findings.
+        """
+        wanted = self.narration_key(finding)
+        for record in self.review_queue:
+            if record.get("narration_source") in (None, "rule"):
+                continue
+            if self.narration_key(record) == wanted:
+                return record
+        return None
+
+    def narration_block(self, finding):
+        """Rendered explanation section, or an empty list if there is none."""
+        record = self.narration_for(finding)
+        if record is None:
+            return []
+
+        heading = ("AI EXPLANATION" if not record.get("narration_is_mock")
+                   else "SAMPLE EXPLANATION (NO MODEL)")
+
+        lines = ["", heading, "\u2500" * 12,
+                 record.get("narrated_explanation", "")]
+
+        provenance = record.get("narration_provenance")
+        if provenance:
+            lines += ["", provenance]
+
+        lines += [
+            "",
+            "This explanation is advisory. The rule, evidence, severity "
+            "and score above are the authoritative record and were "
+            "produced without it.",
+        ]
+        return lines
+
     def show_finding_detail(self, finding):
         finding_type = finding.get(
             "finding_type",
@@ -1211,6 +1474,8 @@ class MainWindow(QMainWindow):
                 indent=2,
             ),
         ]
+
+        lines += self.narration_block(finding)
 
         self.finding_detail.setPlainText(
             "\n".join(lines)
@@ -1429,6 +1694,8 @@ class MainWindow(QMainWindow):
                 indent=2,
             ),
         ]
+
+        text += self.narration_block(review)
 
         self.review_detail.setPlainText(
             "\n".join(text)
@@ -1675,6 +1942,19 @@ class MainWindow(QMainWindow):
             str(review_count)
         )
 
+        # How many findings were ANALYSED versus how many received an AI
+        # explanation. Stating both is the point: an explanation covers a
+        # deliberately small slice of a much larger deterministic result,
+        # and the dashboard should not let that slice look like the whole
+        # assessment.
+        explained = sum(
+            1 for record in self.review_queue
+            if record.get("narration_source") not in (None, "rule")
+        )
+        self.kpi_explained.value_label.setText(
+            f"{explained} / {total_findings}"
+        )
+
         self.dashboard_status.setText(
             "Assessment loaded successfully."
         )
@@ -1761,6 +2041,69 @@ class MainWindow(QMainWindow):
             QLabel#validation_status[state="error"] {
                 color: #f08a8a;
                 border-left: 3px solid #a63d3d;
+            }
+            QLabel#ai_status {
+                padding: 7px 10px;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: 600;
+                background-color: #1b2431;
+                color: #93a4bd;
+                border-left: 3px solid #3d4b5f;
+            }
+            QLabel#ai_status[state="available"] {
+                color: #7fd1a0;
+                border-left: 3px solid #2e7d52;
+            }
+            QLabel#ai_status[state="mock"] {
+                color: #9fb8e0;
+                border-left: 3px solid #4a6fa5;
+            }
+            QLabel#ai_status[state="unavailable"] {
+                color: #e8c07d;
+                border-left: 3px solid #a8792c;
+            }
+            QLabel#ai_status[state="not_configured"] {
+                color: #93a4bd;
+                border-left: 3px solid #3d4b5f;
+            }
+            QLabel#ai_status[state="disabled"] {
+                color: #7d8899;
+                border-left: 3px solid #3d4b5f;
+            }
+            QLabel#settings_note {
+                color: #8c9ab0;
+                font-size: 11px;
+            }
+            QLabel#settings_hint {
+                color: #8c9ab0;
+                font-size: 11px;
+            }
+            QGroupBox {
+                border: 1px solid #2b3648;
+                border-radius: 5px;
+                margin-top: 14px;
+                padding: 14px 12px 12px 12px;
+                font-weight: 600;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 6px;
+                color: #cfd8e6;
+            }
+            QProgressBar#narration_progress {
+                border: 1px solid #2b3648;
+                border-radius: 4px;
+                background-color: #141b26;
+                height: 20px;
+                text-align: center;
+                color: #cfd8e6;
+                font-size: 11px;
+            }
+            QProgressBar#narration_progress::chunk {
+                background-color: #4a6fa5;
+                border-radius: 3px;
             }
             QTextEdit#validation_detail {
                 background-color: #141b26;
