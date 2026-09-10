@@ -3,7 +3,11 @@ from typing import Callable, Optional
 
 from main import run_pipeline, validate_dataset_at
 
-from analytics.ingestion import classify_input, rejection_reason
+from analytics.ingestion import (
+    IngestionError,
+    classify_input,
+    rejection_reason,
+)
 from analytics.validator import DatasetValidationError, ValidationReport
 
 from application.services.ai_config import (
@@ -48,13 +52,22 @@ class AssessmentService:
         return validate_dataset_at(dataset_path)
 
     def _require_supported_input(self, dataset_path: str) -> None:
+        """
+        Reject an unreadable input before any work starts, with the same
+        wording analytics.ingestion would use. Raising IngestionError
+        rather than ValueError means the UI has exactly one failure type
+        to present for every ingestion problem.
+        """
         dataset = Path(dataset_path)
 
         if not dataset.exists():
-            raise ValueError(f"Dataset does not exist:\n{dataset}")
+            raise IngestionError(
+                "The dataset path does not exist.",
+                "Check that the submission is still on disk and readable.",
+                str(dataset))
 
         if classify_input(str(dataset)) is None:
-            raise ValueError(rejection_reason(str(dataset)))
+            raise IngestionError(rejection_reason(str(dataset)))
 
     # ------------------------------------------------------------------
     # Assessment

@@ -1,5 +1,6 @@
 from PySide6.QtCore import QObject, Signal, Slot
 
+from analytics.ingestion import IngestionError
 from analytics.validator import DatasetValidationError
 
 from application.services.assessment_service import (
@@ -28,6 +29,9 @@ class ValidationWorker(QObject):
         try:
             report = AssessmentService().validate(self.dataset_path)
             self.finished.emit(report)
+        except IngestionError as exc:
+            # Carries a message written for a supervisor, plus a remedy.
+            self.failed.emit(exc.message())
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -66,6 +70,9 @@ class AssessmentWorker(QObject):
             # unfit. Routed separately so the UI can render the full
             # validation report instead of a one-line error string.
             self.validation_failed.emit(exc.report)
+
+        except IngestionError as exc:
+            self.failed.emit(exc.message())
 
         except Exception as exc:
             self.failed.emit(str(exc))

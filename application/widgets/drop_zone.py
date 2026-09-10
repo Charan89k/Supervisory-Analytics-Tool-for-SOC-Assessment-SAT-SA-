@@ -4,6 +4,7 @@ from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QPushButton,
     QVBoxLayout,
@@ -56,9 +57,19 @@ class DropZone(QFrame):
         self.or_label.setObjectName("drop_or")
         self.or_label.setAlignment(Qt.AlignCenter)
 
-        self.browse_button = QPushButton("Browse Dataset")
+        # Two explicit buttons rather than one. The previous widget
+        # opened a folder chooser and only offered a file chooser if the
+        # user CANCELLED it, which is undiscoverable — a supervisor with
+        # a submission.zip had no way to know cancelling was the route
+        # to selecting it.
+        self.browse_button = QPushButton("Browse Folder…")
         self.browse_button.setObjectName("browse_button")
         self.browse_button.setCursor(Qt.PointingHandCursor)
+
+        self.browse_file_button = QPushButton("Browse File…")
+        self.browse_file_button.setObjectName("browse_button")
+        self.browse_file_button.setCursor(Qt.PointingHandCursor)
+        self.browse_file_button.setVisible(accepts_files())
 
         self.status = QLabel("No dataset selected")
         self.status.setObjectName("drop_status")
@@ -69,39 +80,33 @@ class DropZone(QFrame):
         layout.addWidget(self.description)
         layout.addSpacing(5)
         layout.addWidget(self.or_label)
-        layout.addWidget(self.browse_button)
+        buttons = QHBoxLayout()
+        buttons.setAlignment(Qt.AlignCenter)
+        buttons.setSpacing(8)
+        buttons.addWidget(self.browse_button)
+        buttons.addWidget(self.browse_file_button)
+        layout.addLayout(buttons)
+
         layout.addSpacing(10)
         layout.addWidget(self.status)
 
-        self.browse_button.clicked.connect(self.browse_dataset)
+        self.browse_button.clicked.connect(self.browse_folder)
+        self.browse_file_button.clicked.connect(self.browse_file)
 
-    def browse_dataset(self):
-        """
-        Offer exactly the input shapes the engine can read. While the
-        only supported format is a directory, this opens a directory
-        chooser and nothing else — an "All Files" escape hatch here
-        only produces a failure two steps later.
-        """
+    def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select SAT-SA Dataset Folder",
-            "",
-        )
-
+            self, "Select SAT-SA Dataset Folder", "")
         if folder:
             self.set_dataset(folder)
-            return
 
-        if not accepts_files():
-            return
-
+    def browse_file(self):
+        """
+        Offer exactly the file formats the engine can read. The filter
+        comes from analytics.ingestion, so it cannot advertise a format
+        the adapters do not implement.
+        """
         path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select SAT-SA Dataset",
-            "",
-            dialog_filter(),
-        )
-
+            self, "Select SAT-SA Dataset File", "", dialog_filter())
         if path:
             self.set_dataset(path)
 

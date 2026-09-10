@@ -17,11 +17,13 @@ platform plugin. Two properties make it safe to run anywhere:
 Run:  QT_QPA_PLATFORM=offscreen python tests/smoke_ui.py
 """
 
+import json
 import os
 import shutil
 import sys
 import tempfile
 import time
+import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["SATSA_NARRATION_BACKEND"] = "mock"
@@ -73,6 +75,25 @@ def corrupt_copy_of(source):
     return tmp
 
 
+def build_zip_submission(destination):
+    """The same submission, zipped inside a wrapper folder."""
+    path = os.path.join(destination, "submission.zip")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in os.listdir(DATA):
+            if name.endswith(".csv"):
+                archive.write(os.path.join(DATA, name),
+                              f"submission_2026Q3/{name}")
+    return path
+
+
+def build_traversal_archive(destination):
+    """A hostile archive that tries to write outside its extraction root."""
+    path = os.path.join(destination, "evil.zip")
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("../../../../tmp/satsa-ui-pwned.csv", "alert_id\nA1\n")
+    return path
+
+
 def main():
     started = time.time()
     app = QApplication(sys.argv)
@@ -89,7 +110,7 @@ def main():
     window.drop_zone.set_dataset(os.path.join(DATA, "alerts.csv"))
     assert window.dataset_path is None, "a bare CSV must not be accepted"
     assert not window.run_button.isEnabled()
-    assert "cannot yet read" in window.validation_detail.toPlainText()
+    assert "cannot read a .csv file" in window.validation_detail.toPlainText()
     assert window.notifications[-1][0] == "warning"
     ok("single CSV refused, RUN stays disabled, reason shown")
 
@@ -146,7 +167,31 @@ def main():
         assert rule in types, f"{rule} never reached the Findings explorer"
         ok(f"{rule} present")
 
-    print("\n[8] No language model was involved")
+    print("\n[8] ZIP submission loads through the UI")
+    workspace = tempfile.mkdtemp(prefix="satsa-smoke-formats-")
+    try:
+        window.drop_zone.set_dataset(build_zip_submission(workspace))
+        assert pump(lambda: not window.validation_busy), "zip validation hung"
+        assert window.dataset_path is not None, "zip was refused"
+        assert "PASSED" in window.validation_status.text(), \
+            window.validation_status.text()
+        assert window.run_button.isEnabled()
+        ok("ZIP archive accepted, validated, and cleared for assessment")
+
+        print("\n[9] Hostile archive is refused in the UI, not extracted")
+        window.drop_zone.set_dataset(build_traversal_archive(workspace))
+        assert pump(lambda: not window.validation_busy)
+        assert not window.run_button.isEnabled()
+        assert not os.path.exists("/tmp/satsa-ui-pwned.csv"), \
+            "path traversal escaped during a UI-driven load"
+        detail = window.validation_detail.toPlainText()
+        assert "unsafe member path" in detail, detail
+        ok("path-traversal archive refused; nothing written outside the root")
+        ok(f"supervisor sees: {detail.splitlines()[0][:64]!r}")
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+    print("\n[10] No language model was involved")
     from analytics.narration import resolve_backend_name
     assert resolve_backend_name({}) == "mock"
     ok("narration backend resolved to 'mock' throughout")

@@ -17,6 +17,7 @@ import yaml
 import pandas as pd
 import numpy as np
 
+from analytics.ingestion import IngestionError
 from analytics.loader import load_soc_dataset
 from analytics.validator import validate_dataset, DatasetValidationError
 from analytics.normalizer import normalize_dataset, build_alerts_enriched
@@ -254,6 +255,9 @@ def main():
                      export_csv=args.export_csv, export_pdf=args.export_pdf,
                      narrate=args.narrate)
     except DatasetValidationError as exc:
+        print(exc.message())
+        raise SystemExit(1)
+    except IngestionError as exc:
         print(exc.message())
         raise SystemExit(1)
 

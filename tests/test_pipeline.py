@@ -19,7 +19,11 @@ import shutil
 import pandas as pd
 import pytest
 
-from analytics.ingestion import classify_input, rejection_reason
+from analytics.ingestion import (
+    IngestionError,
+    classify_input,
+    rejection_reason,
+)
 from analytics.validator import DatasetValidationError
 from main import run_pipeline, validate_dataset_at
 
@@ -151,12 +155,32 @@ def test_duplicate_alert_ids_raise_typed_error_carrying_the_report(tmp_path):
 
 
 def test_missing_required_table_is_reported_not_crashed(tmp_path):
+    """
+    An absent required table raises IngestionError with a message
+    written for a supervisor, not a bare FileNotFoundError.
+    """
     dataset = tmp_path / "incomplete"
     shutil.copytree(DATA, dataset)
     os.remove(dataset / "telemetry.csv")
 
-    with pytest.raises(FileNotFoundError, match="telemetry"):
+    with pytest.raises(IngestionError) as excinfo:
         run_pipeline(str(dataset), str(tmp_path / "out"), CONFIG)
+
+    message = excinfo.value.message()
+    assert "telemetry" in message
+    assert "missing required table" in message.lower()
+
+
+def test_optional_table_may_be_omitted(tmp_path):
+    """incidents/shifts/policies/mitre_techniques are optional by design."""
+    dataset = tmp_path / "no-optionals"
+    shutil.copytree(DATA, dataset)
+    for optional in ("incidents.csv", "shifts.csv", "policies.csv",
+                      "mitre_techniques.csv"):
+        os.remove(dataset / optional)
+
+    results = run_pipeline(str(dataset), str(tmp_path / "out"), CONFIG)
+    assert results["run_metadata"]["entities_assessed"] == 5
 
 
 def test_empty_required_table_is_an_error_not_a_crash(tmp_path):
