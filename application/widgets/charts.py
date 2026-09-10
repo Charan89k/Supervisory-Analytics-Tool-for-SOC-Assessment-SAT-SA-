@@ -36,6 +36,8 @@ from PySide6.QtCharts import (
     QChart,
     QChartView,
     QHorizontalBarSeries,
+    QLineSeries,
+    QScatterSeries,
     QValueAxis,
 )
 from PySide6.QtCore import QMargins, Qt
@@ -209,6 +211,83 @@ class HorizontalBarChart(QChartView):
 
         chart.legend().setVisible(False)
         self.setChart(chart)
+
+
+class TrendLineChart(QChartView):
+    """
+    One measure across submission periods.
+
+    Deliberately single-series. Plotting all five entities together
+    would need five categorical hues, and only the first three slots of
+    the palette clear the all-pairs colour-vision gates — a five-line
+    chart would put yellow beside orange and fail the normal-vision
+    floor outright. The dashboard already works entity-by-entity, so
+    the trend follows the selected row instead.
+    """
+
+    def __init__(self, title: str = "", height: int = 220):
+        super().__init__()
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setMinimumHeight(height)
+        self.setMaximumHeight(height)
+        self.setStyleSheet("background: transparent; border: none;")
+        self._title = title
+        self.set_data([], [])
+
+    def set_data(self, periods: Sequence[str], values: Sequence[float],
+                  subtitle: str = "") -> None:
+        chart = QChart()
+        _style_chart(chart, f"{self._title} — {subtitle}" if subtitle
+                     else self._title, left_margin=52)
+
+        if len(periods) < 2:
+            self.setChart(chart)
+            return
+
+        line = QLineSeries()
+        pen = line.pen()
+        pen.setColor(MAGNITUDE)
+        pen.setWidth(2)          # 2px lines, per the mark spec
+        line.setPen(pen)
+
+        markers = QScatterSeries()
+        markers.setMarkerSize(9.0)      # >= 8px markers
+        markers.setColor(MAGNITUDE)
+        markers.setBorderColor(SURFACE)  # 2px surface ring on the mark
+
+        for index, value in enumerate(values):
+            line.append(index, float(value))
+            markers.append(index, float(value))
+
+        chart.addSeries(line)
+        chart.addSeries(markers)
+
+        category_axis = QBarCategoryAxis()
+        category_axis.append(list(periods))
+        _style_axis(category_axis)
+        chart.addAxis(category_axis, Qt.AlignBottom)
+        line.attachAxis(category_axis)
+        markers.attachAxis(category_axis)
+
+        low, high = min(values), max(values)
+        padding = max((high - low) * 0.18, 1.0)
+        value_axis = QValueAxis()
+        value_axis.setLabelFormat("%.0f")
+        # Never zero-based by default: a score moving 130 -> 61 is the
+        # subject, and forcing the axis to 0 would flatten it to nothing.
+        value_axis.setRange(max(0.0, low - padding), high + padding)
+        value_axis.setTickCount(4)
+        _style_axis(value_axis, show_grid=True)
+        chart.addAxis(value_axis, Qt.AlignLeft)
+        line.attachAxis(value_axis)
+        markers.attachAxis(value_axis)
+
+        chart.legend().setVisible(False)
+        self.setChart(chart)
+
+
+def make_trend_chart(title: str = "", height: int = 220) -> TrendLineChart:
+    return TrendLineChart(title, height)
 
 
 def make_bar_chart(title: str = "", height: int = 200,

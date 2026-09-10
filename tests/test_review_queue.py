@@ -19,19 +19,17 @@ from application.services import review_service as rs
 from application.services.rule_reference import RULES, category_for, describe
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RESULTS = os.path.join(ROOT, "outputs", "desktop_assessment",
-                       "assessment_results.json")
 CONFIG = os.path.join(ROOT, "config", "assessment_rules.yaml")
+DATA = os.path.join(ROOT, "data", "synthetic")
 
 pytestmark = pytest.mark.skipif(
-    not os.path.exists(RESULTS),
-    reason="no assessment output; run main.py first")
+    not os.path.isdir(DATA), reason="synthetic dataset not generated")
 
 
 @pytest.fixture(scope="module")
-def queue():
-    with open(RESULTS) as handle:
-        return json.load(handle)["review_queue"]
+def queue(assessment):
+    """A freshly produced assessment, not whatever is in outputs/."""
+    return assessment["review_queue"]
 
 
 @pytest.fixture(scope="module")

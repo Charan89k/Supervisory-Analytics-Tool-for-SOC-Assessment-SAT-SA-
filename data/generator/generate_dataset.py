@@ -120,15 +120,71 @@ RISK_PROFILES = {
 
 PROFILE_ORDER = ["clean", "typical", "weak", "low_activity", "poor_recordkeeping"]
 
+#: How each entity changes over successive submission periods.
+#:
+#: Trends need ground truth as much as detection rules do. Without a
+#: seeded trajectory the periods differ only by sampling noise, and a
+#: "trend" chart would show random walk — indistinguishable from a real
+#: one, and useless for validating that the trend analysis works.
+#:
+#: Each trajectory names the profile an entity ends at. Rates are blended
+#: linearly from its starting profile to its ending profile across the
+#: periods, so the direction is deliberate and the magnitude is checkable.
+TRAJECTORIES = {
+    "clean": "clean",                     # stays well-run
+    "typical": "weak",                    # degrades
+    "weak": "typical",                    # remediates
+    "low_activity": "low_activity",       # unchanged
+    "poor_recordkeeping": "typical",      # record-keeping improves
+}
+
+
+def blend_profiles(start: dict, end: dict, fraction: float) -> dict:
+    """
+    Linear interpolation between two risk profiles.
+
+    `missing_categories` is an integer count of omitted alert
+    categories, so it is rounded rather than blended into a fraction.
+    """
+    blended = {}
+    for key, start_value in start.items():
+        end_value = end[key]
+        if isinstance(start_value, int) and not isinstance(start_value, bool):
+            blended[key] = int(round(
+                start_value + (end_value - start_value) * fraction))
+        else:
+            blended[key] = start_value + (end_value - start_value) * fraction
+    return blended
+
+
+def period_label(period_index: int, period_count: int, start) -> str:
+    """A period's name. Quarter-style, derived from its own start date."""
+    if period_count <= 1:
+        return "single"
+    quarter = (start.month - 1) // 3 + 1
+    return f"{start.year}-Q{quarter}"
+
 
 def utc_now_minus(days):
     return datetime.now(timezone.utc) - timedelta(days=days)
 
 
-def build_dataset(n_socs: int, alerts_per_soc: int, seed: int) -> dict:
-    random.seed(seed)
-    period_start = utc_now_minus(90)
-    period_end = utc_now_minus(0)
+def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
+                   period_index: int = 0, period_count: int = 1,
+                   days_per_period: int = 90) -> dict:
+    """
+    One submission period's worth of records.
+
+    `period_index` selects where along each entity's trajectory this
+    period sits, and shifts the date window back so successive periods
+    cover successive, non-overlapping spans of time.
+    """
+    random.seed(seed + period_index)
+
+    # Period 0 is the OLDEST, so the newest period ends today.
+    periods_back = (period_count - 1) - period_index
+    period_end = utc_now_minus(periods_back * days_per_period)
+    period_start = utc_now_minus((periods_back + 1) * days_per_period)
 
     socs, analysts, shifts = [], [], []
     alerts, alert_events, cases, escalations = [], [], [], []
@@ -139,9 +195,17 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int) -> dict:
         profile = PROFILE_ORDER[i] if i < len(PROFILE_ORDER) else random.choice(PROFILE_ORDER[:3])
         profiles_assigned.append(profile)
 
+    # Where along the trajectory this period sits: 0.0 at the first
+    # period, 1.0 at the last.
+    progress = (period_index / (period_count - 1)) if period_count > 1 else 0.0
+
     for i, profile in enumerate(profiles_assigned):
         soc_id = f"SOC-{i+1:03d}"
-        cfg = RISK_PROFILES[profile]
+        cfg = blend_profiles(
+            RISK_PROFILES[profile],
+            RISK_PROFILES[TRAJECTORIES[profile]],
+            progress,
+        )
         sector = random.choice(SECTORS)
         n_analysts = random.randint(6, 14)
 
@@ -154,6 +218,8 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int) -> dict:
             "assessment_period_end": period_end.isoformat(),
             "soc_maturity_level": {"clean": 4, "typical": 3, "weak": 2,
                                     "low_activity": 2, "poor_recordkeeping": 2}[profile],
+            "submission_period": period_label(period_index, period_count,
+                                               period_start),
             "analyst_count": n_analysts,
             "shift_count": 3,
             "criticality": random.choice(["HIGH", "MEDIUM", "LOW"]),
@@ -419,25 +485,60 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int) -> dict:
     }, profiles_assigned
 
 
+def write_period(tables, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+    for name, df in tables.items():
+        df.to_csv(os.path.join(out_dir, f"{name}.csv"), index=False)
+
+
 def main():
     parser = argparse.ArgumentParser(description="SAT-SA synthetic dataset generator")
     parser.add_argument("--socs", type=int, default=5, help="Number of SOC entities to generate")
     parser.add_argument("--alerts-per-soc", type=int, default=800, help="Approx. alerts per SOC (before profile volume multiplier)")
     parser.add_argument("--out", default="data/synthetic", help="Output directory for CSVs")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--periods", type=int, default=1,
+                         help="Number of successive submission periods. "
+                              "More than 1 writes one subdirectory per "
+                              "period, which is the layout SAT-SA reads "
+                              "for trend analysis.")
+    parser.add_argument("--days-per-period", type=int, default=90,
+                         help="Length of each submission period in days")
     args = parser.parse_args()
 
-    tables, profiles = build_dataset(args.socs, args.alerts_per_soc, args.seed)
+    if args.periods <= 1:
+        tables, profiles = build_dataset(args.socs, args.alerts_per_soc, args.seed)
+        write_period(tables, args.out)
 
-    os.makedirs(args.out, exist_ok=True)
-    for name, df in tables.items():
-        df.to_csv(os.path.join(args.out, f"{name}.csv"), index=False)
+        print(f"Generated {args.socs} SOCs, {len(tables['alerts'])} alerts "
+              f"-> {args.out}")
+        print("Seeded risk profiles (ground truth):")
+        for i, profile in enumerate(profiles):
+            print(f"  SOC-{i+1:03d}: {profile}")
+        return
 
-    total_alerts = len(tables["alerts"])
-    print(f"Generated {args.socs} SOCs, {total_alerts} alerts -> {args.out}")
-    print("Seeded risk profiles (ground truth):")
+    print(f"Generating {args.periods} submission periods -> {args.out}")
+    total = 0
+    labels = []
+    for index in range(args.periods):
+        tables, profiles = build_dataset(
+            args.socs, args.alerts_per_soc, args.seed,
+            period_index=index, period_count=args.periods,
+            days_per_period=args.days_per_period)
+
+        label = tables["socs"]["submission_period"].iloc[0]
+        labels.append(label)
+        write_period(tables, os.path.join(args.out, label))
+        total += len(tables["alerts"])
+        print(f"  {label}: {len(tables['alerts'])} alerts")
+
+    print(f"\nTotal {total} alerts across {args.periods} periods.")
+    print("Seeded trajectories (ground truth for trends):")
     for i, profile in enumerate(profiles):
-        print(f"  SOC-{i+1:03d}: {profile}")
+        destination = TRAJECTORIES[profile]
+        movement = ("unchanged" if destination == profile
+                    else f"{profile} -> {destination}")
+        print(f"  SOC-{i+1:03d}: {movement}")
 
 
 if __name__ == "__main__":

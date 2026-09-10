@@ -216,3 +216,80 @@ def test_single_csv_is_not_yet_a_supported_input():
 
 def test_nonexistent_path_explains_itself():
     assert "does not exist" in rejection_reason("/no/such/dataset")
+
+
+# ---------------------------------------------------------------------------
+# Multi-period assessment
+# ---------------------------------------------------------------------------
+
+def test_a_single_period_dataset_is_not_mistaken_for_multi_period():
+    from main import detect_periods
+    assert detect_periods(DATA) == []
+
+
+def test_period_detection_ignores_non_dataset_subdirectories(tmp_path):
+    """An outputs folder beside the periods must not become a period."""
+    from main import detect_periods
+
+    root = tmp_path / "submission"
+    for label in ("2026-Q1", "2026-Q2"):
+        (root / label).mkdir(parents=True)
+        (root / label / "alerts.csv").write_text("alert_id\nA1\n")
+    (root / "outputs").mkdir()
+    (root / "notes").mkdir()
+
+    assert [label for label, _ in detect_periods(str(root))] == [
+        "2026-Q1", "2026-Q2"]
+
+
+def test_multi_period_run_requires_more_than_one_period(tmp_path):
+    from main import run_multi_period_pipeline
+    with pytest.raises(ValueError, match="multiple period"):
+        run_multi_period_pipeline(DATA, str(tmp_path), CONFIG)
+
+
+@pytest.mark.slow
+def test_multi_period_assessment_produces_trends(tmp_path):
+    """
+    End to end: generate two periods, assess each independently, and
+    confirm the comparison reproduces both assessments.
+    """
+    import subprocess
+    import sys
+
+    dataset = tmp_path / "periods"
+    subprocess.run(
+        [sys.executable, os.path.join(ROOT, "data", "generator",
+                                       "generate_dataset.py"),
+         "--socs", "3", "--alerts-per-soc", "120", "--periods", "2",
+         "--out", str(dataset)],
+        check=True, capture_output=True)
+
+    from main import run_multi_period_pipeline
+    out = tmp_path / "out"
+    latest, report = run_multi_period_pipeline(
+        str(dataset), str(out), CONFIG)
+
+    assert report.available is True
+    assert len(report.periods) == 2
+
+    # The current assessment is the newest period.
+    assert latest["run_metadata"]["current_period"] == report.periods[-1]
+    assert latest["run_metadata"]["submission_periods"] == 2
+
+    # Per-period outputs exist and the trend report was written.
+    for label in report.periods:
+        assert (out / "periods" / label / "assessment_results.json").exists()
+    assert (out / "trend_report.json").exists()
+
+    # Each series holds one value per period, and they are the scores
+    # the per-period assessments actually produced.
+    for soc_id, series in report.risk_score.items():
+        assert len(series.values) == 2, soc_id
+
+    with open(out / "periods" / report.periods[-1]
+              / "assessment_results.json") as handle:
+        newest = json.load(handle)
+    for entity in newest["entities"]:
+        assert report.risk_score[entity["soc_id"]].values[-1] == pytest.approx(
+            entity["supervisory_risk_score"])

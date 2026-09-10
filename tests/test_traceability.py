@@ -27,12 +27,8 @@ from application.services.rule_reference import RULES, describe
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data", "synthetic")
 CONFIG = os.path.join(ROOT, "config", "assessment_rules.yaml")
-RESULTS = os.path.join(ROOT, "outputs", "desktop_assessment",
-                       "assessment_results.json")
-
 pytestmark = pytest.mark.skipif(
-    not (os.path.isdir(DATA) and os.path.exists(RESULTS)),
-    reason="synthetic dataset or assessment output missing")
+    not os.path.isdir(DATA), reason="synthetic dataset not generated")
 
 
 @pytest.fixture(scope="module")
@@ -42,9 +38,9 @@ def config():
 
 
 @pytest.fixture(scope="module")
-def results():
-    with open(RESULTS) as handle:
-        return json.load(handle)
+def results(assessment):
+    """A freshly produced assessment, not whatever is in outputs/."""
+    return assessment
 
 
 @pytest.fixture(scope="module")

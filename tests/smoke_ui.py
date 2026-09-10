@@ -20,6 +20,7 @@ Run:  QT_QPA_PLATFORM=offscreen python tests/smoke_ui.py
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -546,6 +547,63 @@ def main():
     assert "skipped" in log.lower(), log[-300:]
     ok("assessment completed with an unavailable model; skip was reported")
     os.environ["SATSA_NARRATION_BACKEND"] = forced_backend
+
+    print("\n[15b] Multi-period assessment produces real trends")
+    periods_dir = os.path.join(tempfile.mkdtemp(prefix="satsa-smoke-periods-"),
+                                "submission")
+    try:
+        subprocess.run(
+            [sys.executable,
+             os.path.join(os.path.dirname(DATA), "generator",
+                           "generate_dataset.py"),
+             "--socs", "3", "--alerts-per-soc", "150", "--periods", "3",
+             "--out", periods_dir],
+            check=True, capture_output=True)
+
+        window.ai_settings_saved(AIConfig(enabled=False))
+        window.drop_zone.set_dataset(periods_dir)
+        assert pump(lambda: not window.validation_busy), "validation hung"
+        assert window.run_button.isEnabled()
+        ok("multi-period submission validated")
+
+        window.start_assessment()
+        assert pump(lambda: not window.assessment_busy), "assessment hung"
+
+        report = window.trend_report
+        assert report is not None and report.available
+        assert len(report.periods) == 3
+        ok(f"three periods assessed independently: {', '.join(report.periods)}")
+
+        assert not window.trend_panel.isHidden()
+        assert window.trend_table.rowCount() == 3
+        ok(f"trend panel shows {window.trend_table.rowCount()} entities")
+
+        # Every series must hold one value per period, drawn from that
+        # period's own assessment.
+        for soc_id, series in report.risk_score.items():
+            assert len(series.values) == 3, soc_id
+        ok("each entity has one risk score per period")
+
+        directions = {window.trend_table.item(r, 4).text()
+                      for r in range(window.trend_table.rowCount())}
+        assert directions <= {"up", "down", "mixed", "stable"}, directions
+        ok(f"directions reported: {', '.join(sorted(directions))}")
+
+        chart_series = window.trend_chart.chart().series()
+        assert len(chart_series) == 2, "expected a line and its markers"
+        ok("trend chart drawn for the selected entity")
+    finally:
+        shutil.rmtree(os.path.dirname(periods_dir), ignore_errors=True)
+
+    print("\n[15c] A single-period dataset still refuses to invent a trend")
+    window.drop_zone.set_dataset(DATA)
+    assert pump(lambda: not window.validation_busy)
+    window.start_assessment()
+    assert pump(lambda: not window.assessment_busy)
+    assert window.trend_report is None
+    assert window.trend_panel.isHidden()
+    assert "no trend data" in window.trend_note.text().lower()
+    ok("single period hides the panel and says why")
 
     print("\n[16] Window state persists")
     window.show_page(1)

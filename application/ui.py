@@ -58,7 +58,12 @@ from application.narration_worker import NarrationWorker
 from application.pages.settings_page import SettingsPage
 from application.services.narration_service import NarrationService
 from application.services.settings_service import SettingsService
-from application.widgets.charts import make_bar_chart, severity_color
+from analytics import trends
+from application.widgets.charts import (
+    make_bar_chart,
+    make_trend_chart,
+    severity_color,
+)
 from application.widgets.finding_detail import FindingDetailPanel
 from application.widgets.drop_zone import DropZone
 from application.worker import AssessmentWorker, ValidationWorker
@@ -115,6 +120,7 @@ class MainWindow(QMainWindow):
         self.current_validation_report = None
 
         self.current_finding = None
+        self.trend_report = None
         self._assessment_config = None
         # Re-reads the submission on demand for source-record drill-down.
         # Cached for the session; reset when a new assessment runs.
@@ -697,11 +703,40 @@ class MainWindow(QMainWindow):
         layout.addWidget(open_queue, 0, Qt.AlignLeft)
 
         # ---- Trends -------------------------------------------------
-        layout.addWidget(self.section_title("Trends"))
+        layout.addWidget(self.section_title(
+            "Trends", "How entities changed across submission periods"))
+
         self.trend_note = QLabel("")
         self.trend_note.setObjectName("caveat")
         self.trend_note.setWordWrap(True)
         layout.addWidget(self.trend_note)
+
+        self.trend_panel = QFrame()
+        self.trend_panel.setObjectName("panel")
+        trend_layout = QVBoxLayout(self.trend_panel)
+
+        self.trend_chart = make_trend_chart("Supervisory risk score")
+        trend_layout.addWidget(self.trend_chart)
+
+        self.trend_table = QTableWidget()
+        self.trend_table.setColumnCount(7)
+        self.trend_table.setHorizontalHeaderLabels([
+            "Entity", "First", "Latest", "Change", "Direction",
+            "Ranking", "Findings"])
+        self.trend_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.trend_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.trend_table.verticalHeader().setVisible(False)
+        self.trend_table.horizontalHeader().setStretchLastSection(True)
+        self.trend_table.setMinimumHeight(180)
+        trend_layout.addWidget(self.trend_table)
+
+        self.persistent_note = QLabel("")
+        self.persistent_note.setObjectName("caveat")
+        self.persistent_note.setWordWrap(True)
+        trend_layout.addWidget(self.persistent_note)
+
+        self.trend_panel.hide()
+        layout.addWidget(self.trend_panel)
 
         layout.addStretch()
         scroll.setWidget(body)
@@ -1104,7 +1139,7 @@ class MainWindow(QMainWindow):
         import datetime
 
         self.assessment_busy = False
-        self.current_result, self.current_ai_config = result
+        self.current_result, self.current_ai_config, self.trend_report = result
         self.session.last_assessment_at = (
             datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
 
@@ -1575,6 +1610,15 @@ class MainWindow(QMainWindow):
         self.finding_search.clear()
         self.finding_search.blockSignals(False)
         self.refresh_findings()
+
+    #: Direction is not a verdict — whether a rise is bad depends on the
+    #: measure — so these read as movement, not as good and bad.
+    TREND_COLOURS = {
+        "up": "#ec835a",
+        "down": "#0ca30c",
+        "mixed": "#8c9ab0",
+        "stable": "#8c9ab0",
+    }
 
     SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3,
                       "UNRATED": 4}
@@ -2363,7 +2407,7 @@ class MainWindow(QMainWindow):
         self.refresh_review_preview()
 
         # ---- Trends -------------------------------------------------
-        self.trend_note.setText(dashboard_service.trend_status(results).message)
+        self.refresh_trends()
 
         # ---- WHY + WHAT EVIDENCE ------------------------------------
         # Default to the highest-risk entity: the page should open on
@@ -2372,6 +2416,86 @@ class MainWindow(QMainWindow):
             self.risk_table.selectRow(0)
         else:
             self.dashboard_entity_changed()
+
+    def refresh_trends(self):
+        """
+        Show trends only when more than one period was assessed.
+
+        With a single period the panel stays hidden and the note says
+        what would make trends available. A line drawn through one point
+        would be fabrication.
+        """
+        report = getattr(self, "trend_report", None)
+
+        if report is None or not report.available:
+            self.trend_panel.hide()
+            message = (report.message if report is not None
+                       else dashboard_service.trend_status(
+                           self.current_result).message)
+            self.trend_note.setText(message)
+            return
+
+        self.trend_note.setText(report.summary())
+        self.trend_panel.show()
+
+        rank_by_soc = {r.soc_id: r for r in report.rank_changes}
+        rows = sorted(report.risk_score)
+        self.trend_table.setRowCount(len(rows))
+
+        for index, soc_id in enumerate(rows):
+            series = report.risk_score[soc_id]
+            findings = report.total_findings.get(soc_id)
+            rank = rank_by_soc.get(soc_id)
+
+            cells = [
+                soc_id,
+                f"{series.first:,.1f}" if series.first is not None else "—",
+                f"{series.last:,.1f}" if series.last is not None else "—",
+                series.change_label(),
+                series.direction,
+                rank.label if rank else "—",
+                (findings.change_label() if findings else "—"),
+            ]
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if column == 4:
+                    item.setForeground(QColor(self.TREND_COLOURS.get(
+                        series.direction, "#8c9ab0")))
+                self.trend_table.setItem(index, column, item)
+            self.trend_table.item(index, 0).setData(Qt.UserRole, soc_id)
+
+        self.trend_table.resizeColumnsToContents()
+
+        persistent = trends.persistent_findings(report)
+        if persistent:
+            worst = persistent[:3]
+            names = ", ".join(
+                f"{p.soc_id} {p.finding_type.replace('_', ' ').lower()}"
+                for p in worst)
+            self.persistent_note.setText(
+                f"{len(persistent)} finding types recurred in every one of "
+                f"the {len(report.periods)} periods — conditions that were "
+                f"never resolved. Largest: {names}."
+            )
+        else:
+            self.persistent_note.setText(
+                "No finding type recurred across every period.")
+
+        self.update_trend_chart()
+
+    def update_trend_chart(self):
+        """The trend chart follows the entity selected in the ranking."""
+        report = getattr(self, "trend_report", None)
+        if report is None or not report.available:
+            return
+
+        soc_id = self.selected_dashboard_entity()
+        series = report.risk_score.get(soc_id)
+        if series is None:
+            self.trend_chart.set_data([], [])
+            return
+
+        self.trend_chart.set_data(series.periods, series.values, soc_id)
 
     def selected_dashboard_entity(self):
         items = self.risk_table.selectedItems()
@@ -2416,6 +2540,8 @@ class MainWindow(QMainWindow):
         if title is not None:
             title.setText(f"Risk Drivers & Evidence — {soc_id}"
                           if soc_id else "Risk Drivers & Evidence")
+
+        self.update_trend_chart()
 
         severity = dashboard_service.severity_distribution(results, soc_id)
         self.severity_chart.set_data(severity.labels, severity.values)

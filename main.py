@@ -37,6 +37,7 @@ from analytics.review_queue import build_review_queue
 from analytics.llm_narration import narrate_queue
 from analytics.narration import resolve_backend_name
 from analytics.reporting import write_csv_exports, write_pdf_report
+from analytics.trends import build_trends
 
 
 def load_config(config_path: str) -> dict:
@@ -50,6 +51,128 @@ def df_records(df: pd.DataFrame) -> list:
         return []
     clean = df.astype(object).where(pd.notnull(df), None)
     return clean.to_dict(orient="records")
+
+
+def detect_periods(data_path: str) -> list:
+    """
+    Period subdirectories inside a dataset folder, oldest first.
+
+    A folder is multi-period when its subdirectories each look like a
+    dataset in their own right — that is, each contains alerts.csv or
+    alerts.json. Anything else (an outputs folder, a stray directory) is
+    ignored rather than mistaken for a period.
+
+    Returns [] for a single-period dataset, so the caller can treat the
+    ordinary case as the default.
+    """
+    if not os.path.isdir(data_path):
+        return []
+
+    periods = []
+    for name in sorted(os.listdir(data_path)):
+        candidate = os.path.join(data_path, name)
+        if not os.path.isdir(candidate):
+            continue
+        if any(os.path.exists(os.path.join(candidate, f"alerts{ext}"))
+               for ext in (".csv", ".json")):
+            periods.append((name, candidate))
+
+    return periods
+
+
+def run_multi_period_pipeline(data_path: str, out_path: str, config_path: str,
+                                export_csv: bool = False,
+                                export_pdf: bool = False,
+                                narrate: bool = False,
+                                progress_callback=None):
+    """
+    Assess each submission period independently, then compare them.
+
+    Each period is a full, self-contained assessment. That is what makes
+    the comparison meaningful: risk scores normalise per 100 alerts and
+    several rules are z-scores against peers, so assessing periods
+    together rather than separately would corrupt every number the trend
+    is drawn from.
+
+    The LATEST period's assessment is written to `out_path` as the
+    current assessment, so every existing consumer keeps working
+    unchanged; per-period outputs go to `out_path/periods/<label>/` and
+    the comparison to `out_path/trend_report.json`.
+    """
+    periods = detect_periods(data_path)
+    if len(periods) < 2:
+        raise ValueError(
+            f"{data_path} does not contain multiple period subdirectories.")
+
+    period_results = []
+    for label, path in periods:
+        if progress_callback:
+            progress_callback(f"Assessing period {label}...")
+        print(f"\n=== Period {label} ===")
+
+        results = run_pipeline(
+            path, os.path.join(out_path, "periods", label), config_path,
+            export_csv=export_csv, export_pdf=export_pdf, narrate=narrate)
+        period_results.append((label, results))
+
+    report = build_trends(period_results)
+
+    os.makedirs(out_path, exist_ok=True)
+
+    # The newest period becomes the current assessment.
+    latest_label, latest = period_results[-1]
+    latest = dict(latest)
+    latest["run_metadata"] = {
+        **latest.get("run_metadata", {}),
+        "submission_periods": len(periods),
+        "submission_period_labels": [label for label, _ in periods],
+        "current_period": latest_label,
+    }
+    with open(os.path.join(out_path, "assessment_results.json"), "w") as f:
+        json.dump(latest, f, indent=2, default=str)
+
+    with open(os.path.join(out_path, "trend_report.json"), "w") as f:
+        json.dump(trend_report_to_dict(report), f, indent=2, default=str)
+
+    if progress_callback:
+        progress_callback(f"Trend analysis across {len(periods)} periods")
+
+    print(f"\n{report.summary()}")
+    print(f"Trend report written to: "
+          f"{os.path.join(out_path, 'trend_report.json')}")
+
+    return latest, report
+
+
+def trend_report_to_dict(report) -> dict:
+    """Serialisable form of a TrendReport, for the JSON output."""
+    def series_map(mapping):
+        return {soc: {"periods": s.periods, "values": s.values,
+                       "change": s.change, "direction": s.direction}
+                for soc, s in mapping.items()}
+
+    return {
+        "periods": report.periods,
+        "available": report.available,
+        "message": report.message,
+        "summary": report.summary(),
+        "risk_score": series_map(report.risk_score),
+        "total_findings": series_map(report.total_findings),
+        "execution_gaps": series_map(report.execution_gaps),
+        "negative_space": series_map(report.negative_space),
+        "portfolio": series_map(report.portfolio),
+        "rank_changes": [
+            {"soc_id": r.soc_id, "first_rank": r.first_rank,
+             "last_rank": r.last_rank, "change": r.change, "label": r.label}
+            for r in report.rank_changes
+        ],
+        "repeated_findings": [
+            {"soc_id": r.soc_id, "finding_type": r.finding_type,
+             "periods_seen": r.periods_seen, "counts": r.counts,
+             "period_count": r.period_count}
+            for r in report.repeated_findings
+        ],
+    }
 
 
 def validate_dataset_at(data_path: str):
@@ -245,15 +368,25 @@ def main():
     parser.add_argument("--config", default="config/assessment_rules.yaml", help="Path to rules config")
     parser.add_argument("--export-csv", action="store_true", help="Also write flat CSV exports")
     parser.add_argument("--export-pdf", action="store_true", help="Also write a PDF executive summary")
+    parser.add_argument("--trends", action="store_true",
+                         help="Assess every period subdirectory under --data "
+                              "independently and write a trend comparison")
     parser.add_argument("--narrate", action="store_true",
                          help="Narrate the review queue via the offline Qwen layer "
                               "(requires llm_narration.enabled: true in config and a running Ollama instance)")
     args = parser.parse_args()
 
     try:
-        run_pipeline(args.data, args.out, args.config,
-                     export_csv=args.export_csv, export_pdf=args.export_pdf,
-                     narrate=args.narrate)
+        if args.trends:
+            run_multi_period_pipeline(
+                args.data, args.out, args.config,
+                export_csv=args.export_csv, export_pdf=args.export_pdf,
+                narrate=args.narrate)
+        else:
+            run_pipeline(args.data, args.out, args.config,
+                         export_csv=args.export_csv,
+                         export_pdf=args.export_pdf,
+                         narrate=args.narrate)
     except DatasetValidationError as exc:
         print(exc.message())
         raise SystemExit(1)

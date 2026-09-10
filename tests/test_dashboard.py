@@ -26,18 +26,12 @@ from application.services.dashboard_service import (
 )
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RESULTS = os.path.join(ROOT, "outputs", "desktop_assessment",
-                       "assessment_results.json")
-
-pytestmark = pytest.mark.skipif(
-    not os.path.exists(RESULTS),
-    reason="no assessment output; run main.py first")
 
 
 @pytest.fixture(scope="module")
-def results():
-    with open(RESULTS) as handle:
-        return json.load(handle)
+def results(assessment):
+    """A freshly produced assessment, not whatever is in outputs/."""
+    return assessment
 
 
 def entity(soc_id, peer_group="FINANCE", score=10.0, rank=1,

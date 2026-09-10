@@ -1,7 +1,12 @@
 from pathlib import Path
 from typing import Callable, Optional
 
-from main import run_pipeline, validate_dataset_at
+from main import (
+    detect_periods,
+    run_multi_period_pipeline,
+    run_pipeline,
+    validate_dataset_at,
+)
 
 from analytics.ingestion import (
     IngestionError,
@@ -41,6 +46,10 @@ class AssessmentService:
     # Validation
     # ------------------------------------------------------------------
 
+    def periods(self, dataset_path: str) -> list:
+        """Period subdirectories, if this submission holds more than one."""
+        return detect_periods(dataset_path)
+
     def validate(self, dataset_path: str) -> ValidationReport:
         """
         Run the "AUTOMATIC DATA VALIDATION" workflow step on its own,
@@ -49,6 +58,15 @@ class AssessmentService:
         message when the input is not a dataset SAT-SA can read.
         """
         self._require_supported_input(dataset_path)
+
+        # A multi-period submission is validated on its newest period:
+        # that is the one whose assessment becomes the current result,
+        # and validating every period up front would delay the answer
+        # the supervisor is waiting for.
+        periods = self.periods(dataset_path)
+        if len(periods) >= 2:
+            return validate_dataset_at(periods[-1][1])
+
         return validate_dataset_at(dataset_path)
 
     def _require_supported_input(self, dataset_path: str) -> None:
@@ -93,7 +111,13 @@ class AssessmentService:
             if progress_callback:
                 progress_callback(message)
 
+        periods = self.periods(str(dataset))
+        multi_period = len(periods) >= 2
+
         progress("Preparing assessment...")
+        if multi_period:
+            progress(f"{len(periods)} submission periods detected "
+                      f"({periods[0][0]} to {periods[-1][0]})")
         progress("Running SAT-SA analytics...")
 
         # IMPORTANT:
@@ -101,15 +125,31 @@ class AssessmentService:
         # A DatasetValidationError raised here is deliberately allowed
         # to propagate: it carries the full ValidationReport, and the
         # UI renders it as a validation result rather than a crash.
-        result = run_pipeline(
-            data_path=str(dataset),
-            out_path=str(output_path),
-            config_path=str(self.config_path),
-            export_csv=True,
-            export_pdf=True,
-            narrate=False,
-            progress_callback=progress,
-        )
+        trend_report = None
+
+        if multi_period:
+            # Each period is assessed independently and the results are
+            # compared. Assessing them together would corrupt every
+            # per-period statistic the comparison rests on.
+            result, trend_report = run_multi_period_pipeline(
+                data_path=str(dataset),
+                out_path=str(output_path),
+                config_path=str(self.config_path),
+                export_csv=True,
+                export_pdf=True,
+                narrate=False,
+                progress_callback=progress,
+            )
+        else:
+            result = run_pipeline(
+                data_path=str(dataset),
+                out_path=str(output_path),
+                config_path=str(self.config_path),
+                export_csv=True,
+                export_pdf=True,
+                narrate=False,
+                progress_callback=progress,
+            )
 
         if result is None:
             raise RuntimeError(
@@ -118,4 +158,4 @@ class AssessmentService:
 
         progress("Assessment completed.")
 
-        return result, ai_config
+        return result, ai_config, trend_report
