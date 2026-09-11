@@ -535,6 +535,20 @@ class SettingsPage(QWidget):
             widget.setEnabled(enabled)
         self.refresh_status()
 
+    def _resolved_backend(self) -> str:
+        """
+        The backend that will actually answer, which is not always the
+        configured one — an environment override wins over config.
+
+        Every row on this page is driven from this, so the page cannot
+        contradict itself by describing one backend while showing the
+        controls of another.
+        """
+        try:
+            return resolve_backend_name(self.to_config().to_narration_config())
+        except Exception:
+            return getattr(self, "_backend", "ollama")
+
     def _apply_backend_visibility(self, *_):
         """
         Show only the rows the active inference path actually uses.
@@ -546,7 +560,7 @@ class SettingsPage(QWidget):
         fill it in, which is exactly the manual configuration this
         design removes.
         """
-        backend = getattr(self, "_backend", "ollama")
+        backend = self._resolved_backend()
         is_llamacpp = backend == "llamacpp"
         self.model_path_row.setVisible(is_llamacpp)
         self.model_path_label.setVisible(is_llamacpp)
@@ -556,7 +570,7 @@ class SettingsPage(QWidget):
         self.refresh_status()
 
     def _on_mode_changed(self, *_):
-        backend = getattr(self, "_backend", "ollama")
+        backend = self._resolved_backend()
         mode = self.model_box.currentData()
 
         if backend == "mock":
@@ -583,7 +597,7 @@ class SettingsPage(QWidget):
 
     def _update_cost_hint(self, *_):
         count = self.max_explanations_spin.value()
-        backend = getattr(self, "_backend", "ollama")
+        backend = self._resolved_backend()
 
         if not self.enabled_box.isChecked():
             self.cost_hint.setText(
@@ -608,12 +622,7 @@ class SettingsPage(QWidget):
         self.status_label.style().polish(self.status_label)
         self.remedy_label.setText(status.remedy())
 
-        # The RESOLVED backend, not the configured one: an environment
-        # override changes which backend actually answers, and these
-        # rows must describe the path in use or they contradict the
-        # status line directly above them.
-        self._describe_infrastructure(
-            resolve_backend_name(config.to_narration_config()))
+        self._describe_infrastructure(self._resolved_backend())
         return status
 
     def _describe_infrastructure(self, backend: str):
