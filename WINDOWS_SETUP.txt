@@ -1,0 +1,458 @@
+===============================================================================
+SAT-SA — Supervisory Analytics Tool for SOC Assessment
+RUNNING FROM SOURCE ON A WINDOWS LAPTOP
+Version 0.9.1
+===============================================================================
+
+This file lists every command needed to get SAT-SA running on a second
+Windows machine from the GitHub repository.
+
+READ THIS FIRST — the single most common mistake:
+
+    The repository contains NO DATASET.
+
+    data/synthetic/ and data/demo/ are deliberately not committed
+    (they are generated, not source). A fresh clone has an empty
+    data/ folder apart from the generator.
+
+    You MUST run STEP 5 to create a dataset, or use Demonstration
+    Mode (Ctrl+D) inside the application, which generates its own.
+
+-------------------------------------------------------------------------------
+REQUIREMENTS
+-------------------------------------------------------------------------------
+
+  Windows 10 or 11, 64-bit
+  Python 3.11 or newer        (3.12 / 3.13 recommended)
+  Git for Windows
+  ~1 GB free disk for the virtual environment
+  Internet access ONCE, to clone and to install Python packages
+
+  Administrator rights are NOT required.
+
+  Download Python:  https://www.python.org/downloads/windows/
+  Download Git:     https://git-scm.com/download/win
+
+  IMPORTANT when installing Python: tick "Add python.exe to PATH"
+  on the first screen of the installer.
+
+
+===============================================================================
+PART 1 — INSTALLATION
+===============================================================================
+
+Open PowerShell (press Start, type "PowerShell", press Enter).
+Run these commands one at a time.
+
+
+STEP 1 — Check Python and Git are installed
+-------------------------------------------------------------------------------
+
+python --version
+
+git --version
+
+    Expected: Python 3.11.x or newer, and any git version.
+    If "python" is not recognised, reinstall Python with
+    "Add python.exe to PATH" ticked, then close and reopen PowerShell.
+
+
+STEP 2 — Choose a folder and clone the repository
+-------------------------------------------------------------------------------
+
+cd $HOME\Documents
+
+git clone https://github.com/Charan89k/Supervisory-Analytics-Tool-for-SOC-Assessment-SAT-SA-.git soc_advisory
+
+cd soc_advisory
+
+    If GitHub asks for credentials, use your GitHub username and a
+    Personal Access Token (not your password).
+
+
+STEP 3 — Create and activate a virtual environment
+-------------------------------------------------------------------------------
+
+python -m venv venv
+
+venv\Scripts\Activate.ps1
+
+    Your prompt should now start with (venv).
+
+    IF POWERSHELL REFUSES TO ACTIVATE with a message about
+    "running scripts is disabled on this system", use a bypass
+    scoped to this one window only:
+
+        powershell -NoProfile -ExecutionPolicy Bypass
+
+    then re-run:
+
+        cd $HOME\Documents\soc_advisory
+        venv\Scripts\Activate.ps1
+
+    Do NOT run "Set-ExecutionPolicy Unrestricted". Nothing here
+    requires weakening a machine-wide Windows setting.
+
+    ALTERNATIVE — use Command Prompt (cmd.exe) instead of
+    PowerShell, where activation is:
+
+        venv\Scripts\activate.bat
+
+
+STEP 4 — Install dependencies
+-------------------------------------------------------------------------------
+
+python -m pip install --upgrade pip
+
+python -m pip install -r requirements-desktop.txt
+
+    This installs pandas, pyyaml, reportlab, requests and PySide6.
+    Takes 2-5 minutes. PySide6 is the largest download (~100 MB).
+
+    OPTIONAL — if you also want to run the test suite:
+
+        python -m pip install -r requirements-dev.txt
+
+    NOTE: Ollama, Qwen and llama.cpp are NOT Python packages and
+    are NOT installed by this step. The AI layer is optional and
+    entirely separate — see PART 4.
+
+
+STEP 5 — Generate a dataset  (REQUIRED — the repo ships none)
+-------------------------------------------------------------------------------
+
+python data/generator/generate_dataset.py --socs 5 --alerts-per-soc 800 --out data/synthetic
+
+    Creates 5 synthetic entities with about 3,300 alerts, with
+    seeded ground truth so detection can be measured.
+
+    For a larger, more demonstrative dataset with three peer
+    groups (this is what Demonstration Mode uses):
+
+        python data/generator/generate_dataset.py --socs 15 --alerts-per-soc 350 --seed 20261 --out data/demo
+
+    For a multi-period dataset, needed to demonstrate TRENDS:
+
+        python data/generator/generate_dataset.py --socs 9 --alerts-per-soc 400 --periods 4 --out data/multi-period
+
+
+STEP 6 — Verify the installation
+-------------------------------------------------------------------------------
+
+python desktop.py --self-check
+
+    Every line must read [PASS]. It also writes the same report to
+    a file and tells you where.
+
+    The "Local AI" line is informational only. On a machine with no
+    AI runtime it reads "AI NOT INSTALLED" and that is a PASS —
+    SAT-SA does not need AI.
+
+
+STEP 7 — Launch SAT-SA
+-------------------------------------------------------------------------------
+
+python desktop.py
+
+    The desktop window opens. This IS the application — there is no
+    server to start and no web address to visit.
+
+
+===============================================================================
+PART 2 — USING IT (inside the application window)
+===============================================================================
+
+FASTEST DEMONSTRATION — one keystroke:
+
+    Press  Ctrl+D
+    (or:   New Assessment  ->  Run Demonstration Assessment)
+
+    Builds a 15-entity synthetic submission and assesses it in
+    about 4 seconds, through the real pipeline. On first use it
+    generates the dataset itself, so STEP 5 is not needed for this.
+
+
+FULL WALKTHROUGH:
+
+     1. New Assessment     -> drag in, or Browse to, data\synthetic
+     2. Validation runs automatically
+     3. Click RUN ASSESSMENT            (~1.5 seconds)
+     4. Dashboard          -> entity ranking, risk drivers, Evidence column
+     5. Findings           -> filter by entity, severity or rule
+     6. Click a finding    -> rule, rationale, structured evidence
+     7. Load source records-> the submitted rows behind that finding
+     8. Review Queue       -> prioritised cases; every entity represented
+     9. Benchmarking       -> peer groups and deviation from peer median
+    10. Reports            -> PDF, JSON, CSV exports, validation report
+    11. History            -> every past assessment, immutable
+
+TO DEMONSTRATE OFFLINE OPERATION:
+
+    Turn off Wi-Fi / unplug the network cable, then repeat the above.
+    Nothing changes. SAT-SA makes no external network connection.
+
+
+===============================================================================
+PART 3 — COMMAND LINE (no window needed)
+===============================================================================
+
+Run an assessment and write all reports:
+
+python main.py --data data/synthetic --out outputs --export-csv --export-pdf
+
+    Produces in outputs\ :
+        assessment_results.json      every finding with rule + evidence
+        entity_risk_scores.csv       score, rank, weighted components
+        execution_gap_findings.csv
+        negative_space_findings.csv
+        review_queue.csv
+        executive_summary.pdf
+
+
+Measure detection accuracy against the seeded ground truth:
+
+python main.py --data data/synthetic --out outputs --validate
+
+    Prints precision, recall, TP/FP/FN per rule, ranking quality and
+    review-effort reduction, and writes validation_report.txt.
+    Only works on a GENERATED dataset — a real submission has no labels.
+
+
+Trend analysis across submission periods:
+
+python main.py --data data/multi-period --out outputs --trends
+
+    Requires a dataset generated with --periods 2 or more.
+
+
+See all options:
+
+python main.py --help
+
+
+===============================================================================
+PART 4 — OPTIONAL: LOCAL AI EXPLANATIONS
+===============================================================================
+
+SKIP THIS ENTIRELY IF YOU DO NOT WANT AI.
+
+SAT-SA produces exactly the same findings, scores, evidence and
+reports without it. The AI only restates findings the rule engine has
+already decided, in plainer language. It can never create, remove or
+re-rank a finding.
+
+The AI never runs by itself. After an assessment you go to the
+Review Queue and click [ Explain Top Findings ].
+
+
+OPTION A — Ollama  (easiest, needs internet once)
+-------------------------------------------------------------------------------
+
+  1. Install Ollama from  https://ollama.com/download/windows
+
+  2. Close and reopen PowerShell, then pull the model:
+
+         ollama pull qwen2.5:7b
+
+     Needs about 5 GB of disk and 8 GB of free RAM to run.
+     For a smaller, faster model on a modest laptop:
+
+         ollama pull qwen2.5:3b
+
+  3. Keep the local runtime private to this machine (recommended):
+
+         [Environment]::SetEnvironmentVariable("OLLAMA_HOST","127.0.0.1:11434","User")
+
+  4. Start SAT-SA. It finds the runtime and model automatically —
+     there is no path, folder or address to enter anywhere.
+
+         python desktop.py
+
+     The sidebar should read  AI READY.
+
+  5. If you chose the 3B model, set it in
+     Settings -> Local AI Explanations -> Model -> "Fast — Qwen 2.5 3B",
+     then click Save Settings.
+
+
+  IF YOU HAVE THE PACKAGED BUILD (SAT-SA.exe plus SAT-SA-Setup-AI.ps1),
+  use the bundled setup script instead of steps 1-3:
+
+         .\SAT-SA-Setup-AI.ps1
+
+     or, if PowerShell blocks it:
+
+         powershell -NoProfile -ExecutionPolicy Bypass -File .\SAT-SA-Setup-AI.ps1
+
+     Optional parameters:
+         .\SAT-SA-Setup-AI.ps1 -Model qwen2.5:3b
+         .\SAT-SA-Setup-AI.ps1 -AllowDownload
+
+     The script is offline by default and installs only from files
+     placed beside it. -AllowDownload is what permits it to contact
+     ollama.com, and it prints the URL before doing so.
+
+
+OPTION B — llama.cpp  (for a strictly air-gapped machine)
+-------------------------------------------------------------------------------
+
+No background service and no listening TCP port. The model is a plain
+data file you copy onto the machine.
+
+  1. python -m pip install llama-cpp-python
+
+  2. Copy a .gguf model file onto the machine, for example:
+         C:\SAT-SA\models\qwen2.5-7b-instruct-q4_k_m.gguf
+
+  3. Edit  config\assessment_rules.yaml  and set, under llm_narration:
+
+         enabled: true
+         backend: "llamacpp"
+         model_path: "C:/SAT-SA/models/qwen2.5-7b-instruct-q4_k_m.gguf"
+
+     Use forward slashes in the path, or doubled backslashes.
+
+
+READING THE AI STATUS INDICATOR
+-------------------------------------------------------------------------------
+
+  AI DISABLED           switched off              -> enable in Settings
+  AI NOT INSTALLED      no runtime found          -> install Ollama
+  AI NOT RUNNING        installed, not responding -> start Ollama
+  AI MODEL MISSING      running, model absent     -> ollama pull qwen2.5:7b
+  AI NOT CONFIGURED     llama.cpp, no file chosen -> set model_path
+  SAMPLE EXPLANATIONS   built-in sample explainer -> no model is running
+  AI READY              a real model is reachable
+
+  AI READY means detected and reachable. It does NOT mean anything is
+  running: explanations start only when you click Explain Top Findings.
+
+
+===============================================================================
+PART 5 — OPTIONAL: RUN THE TESTS
+===============================================================================
+
+Requires requirements-dev.txt (see STEP 4).
+
+python -m pytest
+
+    Expected: 541 passed.
+
+
+$env:QT_QPA_PLATFORM="offscreen"; python tests\smoke_ui.py
+
+    Expected: ALL 112 UI SMOKE CHECKS PASSED.
+    To undo that setting afterwards:  $env:QT_QPA_PLATFORM=""
+
+    No test ever loads a language model.
+
+
+===============================================================================
+PART 6 — USING IT AGAIN LATER
+===============================================================================
+
+Every new PowerShell session needs the environment activated first:
+
+cd $HOME\Documents\soc_advisory
+
+venv\Scripts\Activate.ps1
+
+python desktop.py
+
+
+To update to the latest version from GitHub:
+
+cd $HOME\Documents\soc_advisory
+
+git pull origin main
+
+venv\Scripts\Activate.ps1
+
+python -m pip install -r requirements-desktop.txt
+
+python desktop.py --self-check
+
+
+===============================================================================
+PART 7 — TROUBLESHOOTING
+===============================================================================
+
+"python is not recognized"
+    Python is not on PATH. Reinstall it with "Add python.exe to PATH"
+    ticked, then close and reopen PowerShell.
+
+"running scripts is disabled on this system"
+    PowerShell execution policy. Start PowerShell with:
+        powershell -NoProfile -ExecutionPolicy Bypass
+    then activate the environment again. Or use cmd.exe and
+    venv\Scripts\activate.bat instead.
+
+"No such file or directory: data/synthetic"
+    You skipped STEP 5. The repository ships no dataset. Run the
+    generator, or press Ctrl+D in the application to use
+    Demonstration Mode, which generates its own.
+
+"No ground_truth.json" when running --validate
+    Only generated datasets carry labels. A real submission cannot
+    be validated this way. That says nothing about whether it
+    contains findings.
+
+"does not contain multiple period subdirectories" on --trends
+    Generate a dataset with --periods 4 first.
+
+The window does not appear, or opens then closes
+    Run  python desktop.py --self-check  and read the output.
+    If every line is PASS, the application is fine and the issue is
+    graphics-related — try updating your display driver.
+
+Peer benchmarking says a group is too small
+    Peer comparison needs at least 3 entities in a sector, and the
+    sector-relative rules need 5. Regenerate with more entities:
+        --socs 15
+
+pip install fails on PySide6
+    Confirm you are on 64-bit Python 3.11 or newer:
+        python --version
+        python -c "import platform; print(platform.architecture())"
+    32-bit Python has no PySide6 wheels.
+
+AI shows NOT INSTALLED / NOT RUNNING / MODEL MISSING
+    Expected without a local model, and never a problem for an
+    assessment. See PART 4, or ignore it entirely.
+
+
+===============================================================================
+WHERE YOUR DATA IS STORED
+===============================================================================
+
+  Assessments      <project folder>\assessments\<timestamp>\
+                   One immutable folder per run. Nothing is overwritten.
+
+  Settings         %APPDATA%\SAT-SA\settings.json
+
+  CLI outputs      whatever you pass to --out (default: outputs\)
+
+  Submissions      wherever you put them. SAT-SA reads them and never
+                   modifies, moves or copies them elsewhere.
+
+
+===============================================================================
+QUICK REFERENCE — THE WHOLE THING IN 8 COMMANDS
+===============================================================================
+
+cd $HOME\Documents
+git clone https://github.com/Charan89k/Supervisory-Analytics-Tool-for-SOC-Assessment-SAT-SA-.git soc_advisory
+cd soc_advisory
+python -m venv venv
+venv\Scripts\Activate.ps1
+python -m pip install -r requirements-desktop.txt
+python data/generator/generate_dataset.py --socs 5 --alerts-per-soc 800 --out data/synthetic
+python desktop.py
+
+Then press Ctrl+D inside the application for the full demonstration.
+
+===============================================================================
+SAT-SA v0.9.1 — SIH26157 — NTRO / NCIIPC
+Offline supervisory analytics. Supports human supervisory judgement;
+does not replace it.
+===============================================================================
