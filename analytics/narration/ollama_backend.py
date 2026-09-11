@@ -1,16 +1,21 @@
 """
-Ollama backend — DEVELOPMENT convenience, not the shipped product.
+Ollama backend — the DEFAULT zero-configuration AI path.
 
-Kept because Ollama is the fastest way to try a real model on a
-workstation that already has one pulled. It is not the recommended
-air-gapped deployment: it needs a background service installed and
-running on a TCP port, with its own out-of-band model provisioning —
-three separate things for an NCIIPC accreditation to approve. See
-LlamaCppBackend for the shipped path, where the model is a data file
-rather than installed software.
+Chosen as the default because it needs nothing from the user: no
+executable path, no model directory, no endpoint, no GGUF file. The
+runtime is discovered, the model list comes from the service's own API,
+and a single setup script run once provisions both. See
+`ollama_runtime` for the discovery itself.
 
-Talks only to a loopback address. No external network call is made
-here or anywhere else in SAT-SA.
+It is the default, not the universal answer. Ollama installs a
+background service listening on a TCP port, with model provisioning of
+its own — three things an accreditation must approve separately. Where a
+resident service is not permitted, `LlamaCppBackend` remains fully
+supported and loads a plain GGUF data file in-process instead. Both are
+offline; neither is deprecated.
+
+Talks only to a loopback address. No external network call is made here
+or anywhere else in SAT-SA.
 """
 
 from __future__ import annotations
@@ -18,11 +23,19 @@ from __future__ import annotations
 from typing import Optional
 
 from analytics.narration.base import (
+    STATE_AVAILABLE,
+    STATE_MODEL_MISSING,
+    STATE_NOT_INSTALLED,
+    STATE_NOT_RUNNING,
+    STATE_UNAVAILABLE,
     BackendStatus,
     LocalLLMBackend,
     NarrationResult,
     build_prompt,
 )
+from analytics.narration import ollama_runtime
+
+DEFAULT_MODEL = "qwen2.5:7b"
 
 
 class OllamaBackend(LocalLLMBackend):
@@ -31,50 +44,48 @@ class OllamaBackend(LocalLLMBackend):
     def __init__(self, config: Optional[dict] = None):
         super().__init__(config)
         self.base_url = str(
-            self.config.get("base_url", "http://localhost:11434")
+            self.config.get("base_url", ollama_runtime.DEFAULT_ENDPOINT)
         ).rstrip("/")
-        self.model = self.config.get("model", "qwen2.5:7b")
+        self.model = self.config.get("model", DEFAULT_MODEL)
 
     def probe(self) -> BackendStatus:
         """
-        Two questions, both answered against the short probe timeout:
-        is the service up, and is THIS model actually pulled? A running
-        Ollama with a different model is still unusable for us, and
-        reporting it as "available" would mean every explanation fails
-        one by one at generation time with no visible reason.
+        Answer not just "can I be used?" but "what is stopping me?"
+
+        A single "unavailable" would be useless here: nothing installed,
+        a stopped service, and a healthy service missing the model are
+        three different problems with three different fixes, and only
+        one of them needs the setup script. Every branch resolves
+        against the short probe timeout, so a dead service reports
+        itself dead in seconds rather than blocking the window.
         """
-        unavailable = lambda detail: BackendStatus(  # noqa: E731
-            available=False, backend=self.name, model=self.model, detail=detail)
+        def fail(state: str, detail: str) -> BackendStatus:
+            return BackendStatus(available=False, backend=self.name,
+                                 model=self.model, detail=detail, state=state)
 
         try:
-            import requests
+            import requests  # noqa: F401
         except ImportError:
-            return unavailable("the 'requests' package is not installed")
+            return fail(STATE_UNAVAILABLE,
+                        "the 'requests' package is not installed")
 
-        try:
-            response = requests.get(
-                f"{self.base_url}/api/tags", timeout=self.probe_timeout
-            )
-            response.raise_for_status()
-            installed = [
-                m.get("name", "") for m in response.json().get("models", [])
-            ]
-        except Exception:
-            return unavailable(
-                f"no Ollama service is responding at {self.base_url}")
+        status = ollama_runtime.discover(self.base_url, self.probe_timeout)
 
-        if not any(
-            name == self.model or name.startswith(f"{self.model}:")
-            for name in installed
-        ):
-            present = ", ".join(sorted(installed)) or "none"
-            return unavailable(
-                f"Ollama is running but '{self.model}' is not pulled "
-                f"(available locally: {present})")
+        if not status.installed:
+            return fail(STATE_NOT_INSTALLED, status.detail)
+        if not status.service_running:
+            return fail(STATE_NOT_RUNNING, status.detail)
+
+        if not status.has_model(self.model):
+            present = ", ".join(status.models) or "none"
+            return fail(
+                STATE_MODEL_MISSING,
+                f"the local AI runtime is running but '{self.model}' is not "
+                f"installed (present: {present})")
 
         return BackendStatus(
             available=True, backend=self.name, model=self.model,
-            detail=f"Ollama at {self.base_url}")
+            state=STATE_AVAILABLE, detail=f"Ollama at {self.base_url}")
 
     def explain(self, finding: dict) -> Optional[NarrationResult]:
         try:

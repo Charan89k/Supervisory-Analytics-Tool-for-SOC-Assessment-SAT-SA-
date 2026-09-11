@@ -973,7 +973,8 @@ class MainWindow(QMainWindow):
         ai_row = QHBoxLayout()
 
         self.ai_enabled_box = QCheckBox(
-            "Explain top review-queue findings after the assessment"
+            "Enable local AI explanations (started manually from the "
+            "Review Queue)"
         )
         self.ai_enabled_box.setChecked(self.ai_config.enabled)
         self.ai_enabled_box.toggled.connect(self.ai_toggle_changed)
@@ -993,17 +994,15 @@ class MainWindow(QMainWindow):
         self.ai_status_label.setWordWrap(True)
         layout.addWidget(self.ai_status_label)
 
-        self.narration_progress = QProgressBar()
-        self.narration_progress.setObjectName("narration_progress")
-        self.narration_progress.setTextVisible(True)
-        self.narration_progress.hide()
-        layout.addWidget(self.narration_progress)
-
-        self.cancel_narration_button = QPushButton("Cancel Explanations")
-        self.cancel_narration_button.setCursor(Qt.PointingHandCursor)
-        self.cancel_narration_button.clicked.connect(self.cancel_narration)
-        self.cancel_narration_button.hide()
-        layout.addWidget(self.cancel_narration_button)
+        ai_note = QLabel(
+            "Explanations are never generated automatically. An "
+            "assessment finishes in seconds; explaining ten findings on "
+            "a CPU takes minutes, so it is started deliberately from the "
+            "Review Queue, on the findings you choose to look at."
+        )
+        ai_note.setObjectName("caveat")
+        ai_note.setWordWrap(True)
+        layout.addWidget(ai_note)
 
         self.run_button = QPushButton(
             "RUN ASSESSMENT"
@@ -1376,9 +1375,12 @@ class MainWindow(QMainWindow):
 
         self.show_page(0)
 
-        # Narration runs only after the assessment is complete and its
-        # outputs are on disk. Nothing it does can change them.
-        self.maybe_start_narration()
+        # Narration is NOT started here. It is a minutes-long CPU job
+        # whose output changes nothing about the assessment, so running
+        # it automatically would make every run feel slow for a result
+        # the supervisor may not want. The Review Queue offers it as an
+        # explicit action instead.
+        self.announce_narration_available()
 
         # self.thread / self.worker are deliberately left set. Qt owns
         # their teardown via deleteLater; assessment_busy is what gates
@@ -1504,33 +1506,101 @@ class MainWindow(QMainWindow):
 
         self.ai_status_label.setText(status.label())
         self.sidebar_ai_status.setText(status.headline())
+        self.update_narration_controls()
 
         return status
 
-    def maybe_start_narration(self):
+    def narration_blocker(self) -> str:
         """
-        Run the explanation pass, if the supervisor asked for one and a
-        backend is actually usable.
+        Why explanations cannot be started right now, or "" if they can.
 
-        Called only after the assessment has completed and its outputs
-        are already written to disk, so nothing that happens here can
-        affect the assessment's result.
+        One place decides, so the button's enabled state, its tooltip
+        and the message shown on a click can never disagree.
         """
+        if self.narration_busy:
+            return "Explanations are already running."
+        if not self.review_queue:
+            return "Run an assessment first — there is nothing to explain yet."
+        if not self.ai_config.enabled:
+            return ("Local AI explanations are switched off. Enable them on "
+                    "the New Assessment page or in Settings.")
+        return ""
+
+    def update_narration_controls(self):
+        """Keep the Explain action honest about what it will do."""
+        if not hasattr(self, "explain_button"):
+            return  # called before the review page exists
+
+        blocker = self.narration_blocker()
+        self.explain_button.setEnabled(not blocker)
+        self.explain_button.setToolTip(blocker or (
+            f"Explain the top {self.ai_config.max_explanations} queued "
+            f"findings using the local model. Runs on this machine; "
+            f"takes a few minutes."))
+
+    def announce_narration_available(self):
+        """
+        Say that explanations CAN be run — without running them.
+
+        Called when an assessment completes. The deterministic result
+        is already final and on disk at this point; this is an offer,
+        not a pending step.
+        """
+        self.update_narration_controls()
         if not self.ai_config.enabled:
             return
 
         status = self.refresh_ai_status()
-        if not status.available:
+        if status.available:
             self.assessment_log.append(
-                f"\u26a0 AI explanations skipped — {status.detail}. "
+                "\u2139 AI explanations are available. Open the Review "
+                "Queue and select 'Explain Top Findings' to generate them."
+            )
+        else:
+            self.assessment_log.append(
+                f"\u26a0 AI explanations unavailable — {status.detail}. "
                 "Every finding keeps its rule-generated rationale."
+            )
+
+    def start_narration(self):
+        """
+        Run the explanation pass over the current review queue.
+
+        Started only by an explicit supervisor action. It reads the
+        already-decided findings and writes display text back onto
+        them; the assessment, its scores and its outputs on disk are
+        complete before this can run and are untouched by it.
+        """
+        blocker = self.narration_blocker()
+        if blocker:
+            self.set_narration_status(blocker)
+            return
+
+        status = self.refresh_ai_status()
+        if not status.available:
+            message = status.detail
+            remedy = status.remedy()
+            self.set_narration_status(
+                f"AI unavailable — {message}"
+                + (f" {remedy}" if remedy else ""))
+            self.assessment_log.append(
+                f"\u26a0 AI explanations skipped — {message}. "
+                "Every finding keeps its rule-generated rationale."
+            )
+            self.notify(
+                "warning",
+                "AI Unavailable",
+                f"{status.headline()}\n\n{message}"
+                + (f"\n\n{remedy}" if remedy else "")
+                + "\n\nThe assessment is complete and unaffected; every "
+                  "finding keeps its rule-generated rationale.",
             )
             return
 
-        if not self.review_queue:
-            return
-
+        self.set_narration_status(
+            f"Explaining with {status.model} on this machine…")
         self.narration_busy = True
+        self.update_narration_controls()
         self.narration_progress.setValue(0)
         self.narration_progress.setMaximum(
             min(self.ai_config.max_explanations, len(self.review_queue)))
@@ -1557,6 +1627,10 @@ class MainWindow(QMainWindow):
             self.narration_thread.deleteLater)
 
         self.narration_thread.start()
+
+    def set_narration_status(self, text: str):
+        if hasattr(self, "narration_status"):
+            self.narration_status.setText(text)
 
     def narration_progress_update(self, done, total):
         self.narration_progress.setMaximum(total)
@@ -1587,6 +1661,8 @@ class MainWindow(QMainWindow):
         self.cancel_narration_button.hide()
         self.cancel_narration_button.setText("Cancel Explanations")
         self.cancel_narration_button.setEnabled(True)
+        self.update_narration_controls()
+        self.set_narration_status(outcome.summary())
 
         self.assessment_log.append(f"\u2713 {outcome.summary()}")
 
@@ -1601,6 +1677,8 @@ class MainWindow(QMainWindow):
 
         self.narration_progress.hide()
         self.cancel_narration_button.hide()
+        self.update_narration_controls()
+        self.set_narration_status(f"Explanations failed: {message}")
 
         # The assessment is already complete and saved. A narration
         # failure is reported, never escalated into an assessment
@@ -2222,6 +2300,38 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(filters)
 
+        # ---- AI explanations: an action, never an automatic step -----
+        # The control lives here rather than on the assessment page
+        # because this is where explanations appear and where the
+        # supervisor is when they decide they want one.
+        ai_row = QHBoxLayout()
+        ai_row.setSpacing(8)
+
+        self.explain_button = QPushButton("Explain Top Findings")
+        self.explain_button.setObjectName("explain_button")
+        self.explain_button.setCursor(Qt.PointingHandCursor)
+        self.explain_button.clicked.connect(self.start_narration)
+        ai_row.addWidget(self.explain_button)
+
+        self.cancel_narration_button = QPushButton("Cancel Explanations")
+        self.cancel_narration_button.setCursor(Qt.PointingHandCursor)
+        self.cancel_narration_button.clicked.connect(self.cancel_narration)
+        self.cancel_narration_button.hide()
+        ai_row.addWidget(self.cancel_narration_button)
+
+        self.narration_progress = QProgressBar()
+        self.narration_progress.setObjectName("narration_progress")
+        self.narration_progress.setTextVisible(True)
+        self.narration_progress.hide()
+        ai_row.addWidget(self.narration_progress, 1)
+
+        self.narration_status = QLabel("")
+        self.narration_status.setObjectName("caveat")
+        self.narration_status.setWordWrap(True)
+        ai_row.addWidget(self.narration_status, 2)
+
+        layout.addLayout(ai_row)
+
         # ---- Cases | findings-in-case | detail ----------------------
         splitter = QSplitter(Qt.Horizontal)
 
@@ -2282,6 +2392,8 @@ class MainWindow(QMainWindow):
     def refresh_review_queue(self):
         if not hasattr(self, "case_table"):
             return
+
+        self.update_narration_controls()
 
         all_cases = review_service.build_cases(self.review_queue)
 
@@ -3804,6 +3916,30 @@ class MainWindow(QMainWindow):
             #primary_button:disabled {
                 background: #56606d;
                 color: #aab3bd;
+            }
+
+            /* Deliberately outlined, not filled: the AI layer is
+               supplementary, and its action must never compete visually
+               with RUN ASSESSMENT, which produces the authoritative
+               result. */
+            #explain_button {
+                background: #141c26;
+                border: 1px solid #3a4a5f;
+                border-radius: 6px;
+                padding: 8px 16px;
+                color: #cfdae6;
+                font-weight: 600;
+            }
+
+            #explain_button:hover {
+                background: #1d2836;
+                border-color: #4d6480;
+            }
+
+            #explain_button:disabled {
+                background: #11171f;
+                border-color: #232e3c;
+                color: #5e6975;
             }
 
             QComboBox {

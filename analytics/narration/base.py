@@ -28,15 +28,24 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-#: The distinct states the UI must be able to show. "Not configured"
-#: is deliberately separate from "unavailable": an operator who has not
-#: yet pointed SAT-SA at a model file needs different guidance from one
-#: whose configured model has gone missing.
+#: The distinct states the UI must be able to show. Each one implies a
+#: DIFFERENT next action for the operator, which is the whole reason
+#: they are separate: someone who has never installed a runtime needs
+#: different guidance from someone whose service is stopped, and both
+#: differ from someone whose runtime is healthy but lacks the model.
+#: Collapsing these into one "unavailable" state would leave a
+#: supervisor with a red light and no idea what to do about it.
 STATE_DISABLED = "disabled"
 STATE_NOT_CONFIGURED = "not_configured"
+STATE_NOT_INSTALLED = "not_installed"
+STATE_NOT_RUNNING = "not_running"
+STATE_MODEL_MISSING = "model_missing"
 STATE_UNAVAILABLE = "unavailable"
 STATE_AVAILABLE = "available"
 STATE_MOCK = "mock"
+
+#: Every state except AVAILABLE and MOCK means no model will run. The
+#: deterministic assessment is unaffected in all of them.
 
 
 @dataclass(frozen=True)
@@ -65,18 +74,41 @@ class BackendStatus:
         return {
             STATE_DISABLED: "AI DISABLED",
             STATE_NOT_CONFIGURED: "AI NOT CONFIGURED",
+            STATE_NOT_INSTALLED: "AI NOT INSTALLED",
+            STATE_NOT_RUNNING: "AI NOT RUNNING",
+            STATE_MODEL_MISSING: "AI MODEL MISSING",
             STATE_UNAVAILABLE: "AI UNAVAILABLE",
             STATE_MOCK: "SAMPLE EXPLANATIONS",
-            STATE_AVAILABLE: "AI AVAILABLE",
-        }[self.resolved_state()]
+            STATE_AVAILABLE: "AI READY",
+        }.get(self.resolved_state(), "AI UNAVAILABLE")
 
     def label(self) -> str:
         state = self.resolved_state()
         if state == STATE_MOCK:
             return f"SAMPLE EXPLANATIONS (no model) — {self.detail}"
         if state == STATE_AVAILABLE:
-            return f"AI AVAILABLE — {self.backend}: {self.model}"
+            return f"AI READY — {self.backend}: {self.model}"
         return f"{self.headline()} — {self.detail}"
+
+    def remedy(self) -> str:
+        """
+        The one action that would move this state towards AI READY.
+
+        Lives here rather than in the UI so every surface — settings
+        page, status tile, report footer — gives the same instruction.
+        """
+        return {
+            STATE_DISABLED: "Enable local AI explanations in Settings.",
+            STATE_NOT_INSTALLED: (
+                "Run SAT-SA-Setup-AI once to install the local AI runtime. "
+                "SAT-SA works fully without it."),
+            STATE_NOT_RUNNING: (
+                "Start the Ollama service, then select Test AI. On Windows "
+                "it normally starts with the machine."),
+            STATE_MODEL_MISSING: (
+                "Run SAT-SA-Setup-AI to add the model to the local runtime."),
+            STATE_NOT_CONFIGURED: "Select a model file in Settings.",
+        }.get(self.resolved_state(), "")
 
 
 @dataclass(frozen=True)

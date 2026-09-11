@@ -23,6 +23,7 @@ from analytics.narration.base import (
     STATE_DISABLED,
     STATE_MOCK,
     STATE_NOT_CONFIGURED,
+    STATE_NOT_RUNNING,
     STATE_UNAVAILABLE,
     BackendStatus,
 )
@@ -93,14 +94,15 @@ def test_disabled_leaves_every_record_on_its_rule_rationale():
 # Backend status: available / unavailable / not configured
 # ---------------------------------------------------------------------------
 
-def test_llamacpp_without_a_model_path_is_not_configured():
+def test_llamacpp_without_a_model_path_is_not_configured(chooses_own_backend):
     status = NarrationService(
         AIConfig(enabled=True, backend="llamacpp", model_path="")).status()
     assert status.resolved_state() == STATE_NOT_CONFIGURED
     assert status.headline() == "AI NOT CONFIGURED"
 
 
-def test_llamacpp_with_a_missing_file_is_unavailable(tmp_path, monkeypatch):
+def test_llamacpp_with_a_missing_file_is_unavailable(tmp_path, monkeypatch,
+                                                      chooses_own_backend):
     """
     Distinct from not-configured: the operator DID point SAT-SA at a
     model and it is gone, which needs different guidance.
@@ -114,7 +116,8 @@ def test_llamacpp_with_a_missing_file_is_unavailable(tmp_path, monkeypatch):
     assert "missing" in status.detail
 
 
-def test_llamacpp_with_a_real_file_is_available(tmp_path, monkeypatch):
+def test_llamacpp_with_a_real_file_is_available(tmp_path, monkeypatch,
+                                                 chooses_own_backend):
     monkeypatch.setitem(sys.modules, "llama_cpp", types.ModuleType("llama_cpp"))
     model = tmp_path / "qwen2.5-7b-instruct-q4.gguf"
     model.write_bytes(b"\x00" * 4096)
@@ -127,9 +130,21 @@ def test_llamacpp_with_a_real_file_is_available(tmp_path, monkeypatch):
     assert status.is_mock is False
 
 
-def test_unreachable_ollama_is_unavailable_quickly():
-    """Port 1 is reserved; nothing listens there."""
+def test_unreachable_ollama_is_unavailable_quickly(chooses_own_backend,
+                                                    monkeypatch):
+    """
+    Port 1 is reserved; nothing listens there.
+
+    The executable lookup is stubbed so the outcome does not depend on
+    whether the machine running the suite happens to have Ollama
+    installed — that would make the assertion pass or fail for reasons
+    having nothing to do with the code under test.
+    """
     import time
+    from analytics.narration import ollama_runtime
+    monkeypatch.setattr(ollama_runtime, "find_executable",
+                        lambda: "/usr/local/bin/ollama")
+
     config = AIConfig(enabled=True, backend="ollama", availability_timeout=2)
     service = NarrationService(config)
     service.backend.base_url = "http://127.0.0.1:1"
@@ -138,7 +153,11 @@ def test_unreachable_ollama_is_unavailable_quickly():
     status = service.status()
     elapsed = time.time() - started
 
-    assert status.resolved_state() == STATE_UNAVAILABLE
+    # Installed but not answering is reported as exactly that, rather
+    # than as a generic failure: it is the one case the operator fixes
+    # by starting a service, not by installing anything.
+    assert status.available is False
+    assert status.resolved_state() == STATE_NOT_RUNNING
     assert elapsed < 10, "a dead backend must report quickly, not hang the UI"
 
 

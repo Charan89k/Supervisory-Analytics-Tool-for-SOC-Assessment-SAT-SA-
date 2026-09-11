@@ -34,17 +34,22 @@ from PySide6.QtWidgets import (
 )
 
 from analytics.ingestion import describe_supported_inputs
+from analytics.narration import ollama_runtime, resolve_backend_name
 from analytics.narration.service import SEVERITY_SCOPES
 from application.services.ai_config import MODE_LABELS, MODELS, AIConfig
 from application.services.app_settings import AppSettings
 from application.services.narration_service import NarrationService
 
-#: Backend keys paired with what a supervisor should understand them to be.
-BACKEND_CHOICES = [
-    ("llamacpp", "Local model file (llama.cpp) — offline deployment"),
-    ("ollama", "Ollama service — development only"),
-    ("mock", "Sample explanations — no model, for demo and testing"),
-]
+#: How each inference path is described to a supervisor. Which one is
+#: in use is a DEPLOYMENT decision, made once in assessment_rules.yaml
+#: and shown here read-only. A supervisor assessing a SOC should not be
+#: choosing an inference backend, and the default path asks them for
+#: nothing at all: the runtime and model are discovered.
+BACKEND_DESCRIPTIONS = {
+    "ollama": "Local AI runtime (Ollama) — detected automatically",
+    "llamacpp": "Local model file (llama.cpp) — no service required",
+    "mock": "Sample explanations — no model, for demo and testing",
+}
 
 SCOPE_LABELS = {
     "critical": "Critical only",
@@ -303,6 +308,15 @@ class SettingsPage(QWidget):
         )
 
     def _ai_group(self) -> QGroupBox:
+        """
+        Status first, infrastructure read-only.
+
+        Nothing here asks for a path, a port or a model file on the
+        default deployment: the runtime is discovered and the rows
+        below report what was found. The GGUF picker appears only for
+        the strict air-gap path, where a file genuinely has to be
+        named.
+        """
         group = QGroupBox("Local AI Explanations")
         form = QFormLayout(group)
         form.setSpacing(10)
@@ -322,23 +336,50 @@ class SettingsPage(QWidget):
         note.setWordWrap(True)
         form.addRow(note)
 
-        self.backend_box = QComboBox()
-        for key, label in BACKEND_CHOICES:
-            self.backend_box.addItem(label, key)
-        self.backend_box.currentIndexChanged.connect(self._on_backend_changed)
-        form.addRow("Backend", self.backend_box)
+        # ---- Status -------------------------------------------------
+        status_row = QHBoxLayout()
+        self.status_label = QLabel("Checking…")
+        self.status_label.setObjectName("ai_status")
+        self.status_label.setWordWrap(True)
+        self.check_button = QPushButton("Test AI")
+        self.check_button.setCursor(Qt.PointingHandCursor)
+        self.check_button.clicked.connect(self.refresh_status)
+        status_row.addWidget(self.status_label, 1)
+        status_row.addWidget(self.check_button)
+        form.addRow("Status", status_row)
 
+        #: What to do about it, when the answer is not "ready". Kept
+        #: next to the status so a red light is never a dead end.
+        self.remedy_label = QLabel("")
+        self.remedy_label.setObjectName("settings_note")
+        self.remedy_label.setWordWrap(True)
+        form.addRow("", self.remedy_label)
+
+        # ---- Runtime (discovered, read-only) ------------------------
+        self.runtime_label = QLabel("")
+        self.runtime_label.setObjectName("settings_note")
+        self.runtime_label.setWordWrap(True)
+        form.addRow("Runtime", self.runtime_label)
+
+        # ---- Model --------------------------------------------------
         self.model_box = QComboBox()
         for key in ("fast", "balanced", "deep"):
             self.model_box.addItem(MODE_LABELS[key], key)
         self.model_box.currentIndexChanged.connect(self._on_mode_changed)
-        form.addRow("Model quality", self.model_box)
+        form.addRow("Model", self.model_box)
 
         self.model_hint = QLabel("")
         self.model_hint.setObjectName("settings_note")
         self.model_hint.setWordWrap(True)
         form.addRow("", self.model_hint)
 
+        # ---- Connection (read-only) ---------------------------------
+        self.connection_label = QLabel("")
+        self.connection_label.setObjectName("settings_note")
+        self.connection_label.setWordWrap(True)
+        form.addRow("Connection", self.connection_label)
+
+        # ---- Strict air-gap path only -------------------------------
         path_row = QHBoxLayout()
         self.model_path_edit = QLineEdit()
         self.model_path_edit.setPlaceholderText(
@@ -351,18 +392,8 @@ class SettingsPage(QWidget):
         self.model_path_row = QWidget()
         self.model_path_row.setLayout(path_row)
         path_row.setContentsMargins(0, 0, 0, 0)
-        form.addRow("Model file", self.model_path_row)
-
-        status_row = QHBoxLayout()
-        self.status_label = QLabel("Checking…")
-        self.status_label.setObjectName("ai_status")
-        self.status_label.setWordWrap(True)
-        self.check_button = QPushButton("Check Status")
-        self.check_button.setCursor(Qt.PointingHandCursor)
-        self.check_button.clicked.connect(self.refresh_status)
-        status_row.addWidget(self.status_label, 1)
-        status_row.addWidget(self.check_button)
-        form.addRow("Status", status_row)
+        self.model_path_label = QLabel("Model file")
+        form.addRow(self.model_path_label, self.model_path_row)
 
         return group
 
@@ -453,10 +484,11 @@ class SettingsPage(QWidget):
     def load_from(self, config: AIConfig):
         self.config = config
 
-        self.enabled_box.setChecked(config.enabled)
+        # The inference path is deployment configuration, not a setting
+        # the supervisor edits. It round-trips untouched.
+        self._backend = config.backend or "ollama"
 
-        index = self.backend_box.findData(config.backend)
-        self.backend_box.setCurrentIndex(index if index >= 0 else 0)
+        self.enabled_box.setChecked(config.enabled)
 
         index = self.model_box.findData(config.mode)
         self.model_box.setCurrentIndex(index if index >= 0 else 1)
@@ -473,14 +505,14 @@ class SettingsPage(QWidget):
         self.probe_timeout_spin.setValue(config.availability_timeout)
 
         self._on_enabled_toggled(config.enabled)
-        self._on_backend_changed()
+        self._apply_backend_visibility()
         self._on_mode_changed()
 
     def to_config(self) -> AIConfig:
         mode = self.model_box.currentData() or "balanced"
         return AIConfig(
             enabled=self.enabled_box.isChecked(),
-            backend=self.backend_box.currentData() or "mock",
+            backend=getattr(self, "_backend", "ollama"),
             mode=mode,
             model=MODELS[mode],
             model_path=self.model_path_edit.text().strip(),
@@ -497,24 +529,34 @@ class SettingsPage(QWidget):
     # ------------------------------------------------------------------
 
     def _on_enabled_toggled(self, enabled: bool):
-        for widget in (self.backend_box, self.model_box, self.model_path_row,
+        for widget in (self.model_box, self.model_path_row,
                         self.max_explanations_spin, self.max_rank_spin,
                         self.scope_box):
             widget.setEnabled(enabled)
         self.refresh_status()
 
-    def _on_backend_changed(self, *_):
-        backend = self.backend_box.currentData()
-        # A .gguf path is meaningful only to llama.cpp; Ollama resolves a
-        # model by name and the sample explainer runs no model at all.
-        self.model_path_row.setVisible(backend == "llamacpp")
+    def _apply_backend_visibility(self, *_):
+        """
+        Show only the rows the active inference path actually uses.
+
+        A .gguf path is meaningful only to llama.cpp; the default path
+        resolves a model by name through a runtime it discovered, and
+        the sample explainer runs no model at all. Showing an empty
+        "Model file" box on the default path would invite someone to
+        fill it in, which is exactly the manual configuration this
+        design removes.
+        """
+        backend = getattr(self, "_backend", "ollama")
+        is_llamacpp = backend == "llamacpp"
+        self.model_path_row.setVisible(is_llamacpp)
+        self.model_path_label.setVisible(is_llamacpp)
         self.model_box.setEnabled(
             self.enabled_box.isChecked() and backend == "ollama")
         self._on_mode_changed()
         self.refresh_status()
 
     def _on_mode_changed(self, *_):
-        backend = self.backend_box.currentData()
+        backend = getattr(self, "_backend", "ollama")
         mode = self.model_box.currentData()
 
         if backend == "mock":
@@ -533,14 +575,15 @@ class SettingsPage(QWidget):
                 "for it.")
         else:
             self.model_hint.setText(
-                f"Ollama will be asked for '{MODELS.get(mode, '')}'. The "
-                "model must already be pulled on this machine.")
+                f"The local runtime will be asked for "
+                f"'{MODELS.get(mode, '')}'. If it is not installed, run "
+                f"SAT-SA-Setup-AI once — no paths to enter.")
 
         self._update_cost_hint()
 
     def _update_cost_hint(self, *_):
         count = self.max_explanations_spin.value()
-        backend = self.backend_box.currentData()
+        backend = getattr(self, "_backend", "ollama")
 
         if not self.enabled_box.isChecked():
             self.cost_hint.setText(
@@ -556,12 +599,49 @@ class SettingsPage(QWidget):
                 f"cancelled at any point.")
 
     def refresh_status(self, *_):
-        status = NarrationService(config=self.to_config()).status()
+        config = self.to_config()
+        status = NarrationService(config=config).status()
+
         self.status_label.setText(status.label())
         self.status_label.setProperty("state", status.resolved_state())
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
+        self.remedy_label.setText(status.remedy())
+
+        # The RESOLVED backend, not the configured one: an environment
+        # override changes which backend actually answers, and these
+        # rows must describe the path in use or they contradict the
+        # status line directly above them.
+        self._describe_infrastructure(
+            resolve_backend_name(config.to_narration_config()))
         return status
+
+    def _describe_infrastructure(self, backend: str):
+        """
+        Report what was discovered — never ask for it.
+
+        The runtime line names the executable that was actually found,
+        so an operator can confirm SAT-SA is talking to the install
+        they expect without being asked to locate it.
+        """
+        description = BACKEND_DESCRIPTIONS.get(backend, backend)
+
+        if backend == "ollama":
+            executable = ollama_runtime.find_executable()
+            found = executable or "not detected on this machine"
+            self.runtime_label.setText(f"{description} — {found}")
+            self.connection_label.setText(
+                f"{ollama_runtime.DEFAULT_ENDPOINT} — this machine only. "
+                "SAT-SA makes no external network connection.")
+        elif backend == "llamacpp":
+            self.runtime_label.setText(
+                f"{description} — loaded in-process, no service, no port.")
+            self.connection_label.setText(
+                "None. The model file is read directly by SAT-SA.")
+        else:
+            self.runtime_label.setText(description)
+            self.connection_label.setText(
+                "None. No language model is contacted.")
 
     def browse_model(self):
         path, _ = QFileDialog.getOpenFileName(

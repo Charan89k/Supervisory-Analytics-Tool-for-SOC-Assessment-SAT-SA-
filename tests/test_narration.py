@@ -20,6 +20,7 @@ import yaml
 
 from analytics.narration import (
     BACKENDS,
+    DEFAULT_BACKEND,
     LlamaCppBackend,
     MockBackend,
     OllamaBackend,
@@ -95,8 +96,17 @@ def test_disabled_narration_still_populates_every_record(cfg):
 # 2. AI backend unavailable
 # ---------------------------------------------------------------------------
 
-def test_unavailable_ollama_reports_unavailable_not_crash():
-    """Port 1 is reserved and nothing listens on it — a dead backend."""
+def test_unavailable_ollama_reports_unavailable_not_crash(monkeypatch):
+    """
+    Port 1 is reserved and nothing listens on it — a dead backend.
+
+    find_executable is stubbed so this asserts the probe's behaviour
+    rather than the contents of the developer's PATH.
+    """
+    from analytics.narration import ollama_runtime
+    monkeypatch.setattr(ollama_runtime, "find_executable",
+                        lambda: "/usr/local/bin/ollama")
+
     backend = OllamaBackend({
         "base_url": "http://127.0.0.1:1",
         "model": "qwen2.5:7b",
@@ -105,7 +115,8 @@ def test_unavailable_ollama_reports_unavailable_not_crash():
     status = backend.probe()
     assert status.available is False
     assert "127.0.0.1:1" in status.detail
-    assert "AI UNAVAILABLE" in status.label()
+    assert "AI NOT RUNNING" in status.label()
+    assert status.remedy()
 
 
 def test_unavailable_backend_explain_returns_none_without_raising():
@@ -230,9 +241,28 @@ def test_environment_override_beats_config(cfg, monkeypatch):
 
 
 def test_unknown_backend_falls_back_without_raising(cfg, monkeypatch):
+    """
+    A misspelled backend name resolves to the sample explainer, which
+    labels its own output — never to the real default, which would run
+    a model the operator did not ask for and hide the typo.
+    """
     monkeypatch.delenv("SATSA_NARRATION_BACKEND", raising=False)
     scoped = {"llm_narration": {**cfg["llm_narration"], "backend": "typo"}}
     assert isinstance(create_backend(scoped), MockBackend)
+
+
+def test_absent_backend_setting_resolves_to_the_zero_config_default(
+        cfg, monkeypatch):
+    """
+    The other half of the rule above: nothing configured is not an
+    error, it is the shipped default, and it must not need an entry in
+    a config file to work.
+    """
+    monkeypatch.delenv("SATSA_NARRATION_BACKEND", raising=False)
+    scoped = {"llm_narration": {k: v for k, v in cfg["llm_narration"].items()
+                                 if k != "backend"}}
+    assert resolve_backend_name(scoped) == DEFAULT_BACKEND
+    assert DEFAULT_BACKEND == "ollama"
 
 
 def test_llamacpp_reads_its_real_configuration():

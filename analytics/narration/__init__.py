@@ -5,15 +5,20 @@ Backend selection lives here so that nothing above this package knows
 which inference path is in use:
 
     LocalLLMBackend
-    ├── LlamaCppBackend   (shipped: local .gguf, no service)
-    ├── OllamaBackend     (development: local Ollama daemon)
+    ├── OllamaBackend     (DEFAULT: zero-configuration local runtime)
+    ├── LlamaCppBackend   (STRICT AIR-GAP: local .gguf, no service)
     └── MockBackend       (tests/demo: deterministic samples, no model)
+
+Ollama is the default because it is the only path that needs nothing
+from the user — no paths, no model file, no endpoint. LlamaCppBackend
+is the supported alternative wherever a resident background service is
+not permitted; it is not deprecated, and both run entirely offline.
 
 Resolution order, most specific first:
 
     1. SATSA_NARRATION_BACKEND environment variable
     2. llm_narration.backend in assessment_rules.yaml
-    3. "mock"
+    3. DEFAULT_BACKEND
 
 The environment variable exists so automated tests and UI smoke runs
 can force the mock backend without editing config or risking a real
@@ -46,7 +51,10 @@ BACKENDS: Dict[str, Type[LocalLLMBackend]] = {
 #: run without loading a language model.
 ENV_BACKEND = "SATSA_NARRATION_BACKEND"
 
-DEFAULT_BACKEND = "mock"
+#: The zero-configuration path. An operator who installs nothing still
+#: gets a working assessment: this backend simply probes as
+#: "AI NOT INSTALLED" and every deterministic output is unchanged.
+DEFAULT_BACKEND = "ollama"
 
 __all__ = [
     "BACKENDS", "BackendStatus", "DEFAULT_BACKEND", "ENV_BACKEND",
@@ -66,6 +74,15 @@ def resolve_backend_name(cfg: Optional[dict] = None) -> str:
     if configured in BACKENDS:
         return configured
 
+    if configured:
+        # Configured, but not a name we recognise. This is a typo, and
+        # it must not resolve to DEFAULT_BACKEND: that would silently
+        # run a real model under a name the operator did not write, and
+        # the mistake would never surface. The sample explainer is the
+        # honest answer — it announces itself as a sample in every
+        # output, so the misconfiguration is visible rather than hidden.
+        return "mock"
+
     return DEFAULT_BACKEND
 
 
@@ -73,7 +90,10 @@ def create_backend(cfg: Optional[dict] = None) -> LocalLLMBackend:
     """
     Build the configured backend. Never raises on an unknown name — an
     assessment must not fail because of a typo in an optional layer;
-    it falls back to the mock explainer, which announces itself.
+    it falls back to the mock explainer, which announces itself. An
+    ABSENT setting is different from a wrong one, and resolves to
+    DEFAULT_BACKEND: that is what makes the shipped product
+    zero-configuration.
     """
     narration_cfg = dict((cfg or {}).get("llm_narration", {}) or {})
     name = resolve_backend_name(cfg)

@@ -429,12 +429,24 @@ def main():
     assert window.sidebar_ai_status.text() == "AI NOT CONFIGURED"
     ok("llama.cpp with no model file -> 'AI NOT CONFIGURED'")
 
+    # Every outcome here is legitimate and depends only on what this
+    # machine happens to have installed — which is the point: discovery
+    # is automatic, and each state names its own remedy rather than
+    # collapsing into one unhelpful "unavailable".
     window.ai_settings_saved(AIConfig(enabled=True, backend="ollama",
                                        model="qwen2.5:7b",
                                        availability_timeout=2))
-    assert window.sidebar_ai_status.text() in (
-        "AI UNAVAILABLE", "AI AVAILABLE"), window.sidebar_ai_status.text()
-    ok(f"ollama probe -> {window.sidebar_ai_status.text()!r} (no model loaded)")
+    headline = window.sidebar_ai_status.text()
+    assert headline in ("AI NOT INSTALLED", "AI NOT RUNNING",
+                         "AI MODEL MISSING", "AI READY"), headline
+    status = window.current_ai_status()
+    assert status.detail, "every AI state must explain itself"
+    assert status.available == (headline == "AI READY")
+    if headline != "AI READY":
+        assert status.remedy(), f"{headline} offers no next step"
+    ok(f"ollama auto-discovery -> {headline!r} (no paths entered, "
+       f"no model loaded)")
+    ok(f"   detail: {status.detail[:70]}")
 
     os.environ["SATSA_NARRATION_BACKEND"] = forced_backend
 
@@ -442,17 +454,36 @@ def main():
     assert window.sidebar_ai_status.text() == "SAMPLE EXPLANATIONS"
     ok("mock -> 'SAMPLE EXPLANATIONS'")
 
-    print("\n[11] Explanations run after an assessment, bounded by scope")
+    print("\n[11] Explanations are an explicit action, never automatic")
     window.ai_config.max_explanations = 5
+    window.narration_outcome = None
     window.drop_zone.set_dataset(DATA)
     assert pump(lambda: not window.validation_busy)
     window.ai_enabled_box.setChecked(True)
     window.start_assessment()
     assert pump(lambda: not window.assessment_busy), "assessment hung"
+
+    # The critical assertion of this section. Explaining ten findings on
+    # a CPU takes minutes and changes nothing about the assessment, so
+    # an assessment must finish without starting one.
+    assert not window.narration_busy, "narration started on its own"
+    assert window.narration_outcome is None, "narration ran unasked"
+    assert not any(r.get("narration_source") == "mock"
+                    for r in window.review_queue), \
+        "findings were narrated without the supervisor asking"
+    log = window.assessment_log.toPlainText()
+    assert "Explain Top Findings" in log, log[-300:]
+    ok("assessment completed WITHOUT generating explanations")
+    ok("supervisor is told explanations are available, not made to wait")
+
+    # And now the explicit action.
+    window.show_page(3)
+    assert window.explain_button.isEnabled(), window.explain_button.toolTip()
+    window.explain_button.click()
     assert pump(lambda: not window.narration_busy), "narration hung"
 
     outcome = window.narration_outcome
-    assert outcome is not None, "narration never ran"
+    assert outcome is not None, "the Explain action did not run narration"
     assert outcome.explained == 5, outcome.explained
     ok(f"{outcome.explained} of {outcome.considered} queue items explained "
        f"(from {len(window.findings)} findings)")
@@ -467,6 +498,14 @@ def main():
                  if r.get("narration_source") == "rule"]
     assert len(untouched) == len(window.review_queue) - 5
     ok(f"{len(untouched)} out-of-scope items kept their rule rationale")
+
+    # The button must also refuse to run when it cannot: a disabled
+    # action with a stated reason, not a click that quietly does nothing.
+    window.ai_enabled_box.setChecked(False)
+    assert not window.explain_button.isEnabled()
+    assert "switched off" in window.explain_button.toolTip()
+    ok(f"action disabled with a reason: {window.explain_button.toolTip()[:58]}")
+    window.ai_enabled_box.setChecked(True)
 
     print("\n[12] Deterministic result is unchanged by narration")
     assert window.risk_table.rowCount() == 5
@@ -607,8 +646,16 @@ def main():
     assert window.risk_table.rowCount() == 5
     assert not window.narration_busy
     log = window.assessment_log.toPlainText()
-    assert "skipped" in log.lower(), log[-300:]
-    ok("assessment completed with an unavailable model; skip was reported")
+    assert "unavailable" in log.lower(), log[-300:]
+    ok("assessment completed with an unavailable model; state was reported")
+
+    # Asking anyway must fail safe and say why, not hang or half-run.
+    window.show_page(3)
+    window.start_narration()
+    assert not window.narration_busy
+    assert window.narration_status.text().startswith("AI unavailable")
+    ok(f"explicit request refused cleanly: "
+       f"{window.narration_status.text()[:58]}")
     os.environ["SATSA_NARRATION_BACKEND"] = forced_backend
 
     print("\n[14a] Capability mapping")

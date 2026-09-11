@@ -151,27 +151,33 @@ llm_narration:
   # precondition for running one.
   enabled: false
 
+  # ollama   - DEFAULT: zero-configuration local runtime, discovered
+  #            automatically. The operator enters no paths at all.
+  # llamacpp - STRICT AIR-GAP: a local .gguf data file, no service to
+  #            install. Use where a resident daemon is not permitted.
   # mock     - built-in deterministic sample explainer, no model (tests/demo)
-  # llamacpp - SHIPPED path: a local .gguf file, no service to install
-  # ollama   - development convenience on a workstation with Ollama
   #
   # Override for a single run with SATSA_NARRATION_BACKEND=mock, which
   # is what the test suite and UI smoke tests use so that no automated
   # run can ever spin up a multi-gigabyte model.
-  backend: "mock"
+  backend: "ollama"
 
-  # --- llamacpp (shipped) ---
-  # Absolute path to the GGUF model file. In an air-gapped deployment
-  # this file arrives on the same media as the dataset; updating the
-  # model means replacing this file and restarting. Empty = no local
-  # model configured, and the UI reports "AI unavailable".
+  # --- llamacpp (strict air-gap path only) ---
+  # Absolute path to the GGUF model file. Read by LlamaCppBackend and
+  # by nothing else: the default Ollama path never consults it, which
+  # is why the settings screen does not ask for it. In an air-gapped
+  # deployment this file arrives on the same media as the dataset;
+  # updating the model means replacing this file and restarting.
   model_path: ""
   context_size: 4096
   max_tokens: 320
   # 0 = let llama.cpp choose based on the host CPU
   threads: 0
 
-  # --- ollama (development) ---
+  # --- ollama (default path) ---
+  # Ollama's own loopback default. Discovered, not asked for; present
+  # here only so a site that has moved the port can correct it. Never
+  # point this at another machine — SAT-SA is a local-only tool.
   base_url: "http://localhost:11434"
 
   # Model identifier. qwen2.5:7b is the balanced default.

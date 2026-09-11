@@ -44,12 +44,17 @@ class AIConfig:
 
     enabled: bool = False
 
-    #: "llamacpp" (shipped), "ollama" (development), "mock" (tests/demo)
+    #: "ollama" (default, zero-configuration), "llamacpp" (strict
+    #: air-gap), "mock" (tests/demo).
     backend: str = DEFAULT_BACKEND
     mode: str = "balanced"
     model: str = MODELS["balanced"]
 
-    #: Path to a local .gguf file — the shipped llama.cpp deployment.
+    #: Path to a local .gguf file. Used ONLY by LlamaCppBackend, the
+    #: strict air-gap path. The default Ollama path discovers its own
+    #: runtime and model, so this stays empty and the settings screen
+    #: does not ask for it — it is deployment configuration and
+    #: diagnostics, not a supervisor-facing choice.
     model_path: str = ""
 
     severity_scope: str = "critical_high"
