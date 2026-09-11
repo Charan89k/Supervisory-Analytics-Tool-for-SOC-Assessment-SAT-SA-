@@ -19,6 +19,7 @@ from application.services.ai_config import (
     AIConfig,
     create_ai_config,
 )
+from application.services.app_settings import AppSettings
 from application.services.history_service import AssessmentRun, HistoryService
 
 
@@ -28,10 +29,14 @@ class AssessmentService:
     deterministic assessment pipeline.
     """
 
-    def __init__(self, history: Optional[HistoryService] = None):
+    def __init__(self, history: Optional[HistoryService] = None,
+                  settings: Optional[AppSettings] = None):
         self.project_root = Path(__file__).resolve().parents[2]
+        self.settings = settings or AppSettings()
         # Each assessment writes to its own immutable run directory.
-        self.history = history or HistoryService()
+        self.history = history or HistoryService(
+            Path(self.settings.history_directory)
+            if self.settings.history_directory else None)
 
         self.config_path = (
             self.project_root
@@ -63,10 +68,8 @@ class AssessmentService:
         # and validating every period up front would delay the answer
         # the supervisor is waiting for.
         periods = self.periods(dataset_path)
-        if len(periods) >= 2:
-            return validate_dataset_at(periods[-1][1])
-
-        return validate_dataset_at(dataset_path)
+        target = periods[-1][1] if len(periods) >= 2 else dataset_path
+        return validate_dataset_at(target, self.settings.ingestion_limits())
 
     def _require_supported_input(self, dataset_path: str) -> None:
         """
@@ -137,8 +140,8 @@ class AssessmentService:
                 data_path=str(dataset),
                 out_path=str(output_path),
                 config_path=str(self.config_path),
-                export_csv=True,
-                export_pdf=True,
+                export_csv=self.settings.generate_csv_exports,
+                export_pdf=self.settings.generate_pdf_report,
                 narrate=False,
                 progress_callback=progress,
             )
@@ -147,10 +150,12 @@ class AssessmentService:
                 data_path=str(dataset),
                 out_path=str(output_path),
                 config_path=str(self.config_path),
-                export_csv=True,
-                export_pdf=True,
+                export_csv=self.settings.generate_csv_exports,
+                export_pdf=self.settings.generate_pdf_report,
                 narrate=False,
                 progress_callback=progress,
+                strict_validation=self.settings.strict_validation,
+                limits=self.settings.ingestion_limits(),
             )
 
         if result is None:

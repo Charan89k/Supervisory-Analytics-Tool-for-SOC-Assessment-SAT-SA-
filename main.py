@@ -220,7 +220,7 @@ def trend_report_to_dict(report) -> dict:
     }
 
 
-def validate_dataset_at(data_path: str):
+def validate_dataset_at(data_path: str, limits=None):
     """
     Load and validate a dataset WITHOUT running any analytics.
 
@@ -230,7 +230,8 @@ def validate_dataset_at(data_path: str):
     (only on an unreadable dataset), so the caller decides what to do
     with errors.
     """
-    data = load_soc_dataset(data_path)
+    data = (load_soc_dataset(data_path, limits) if limits is not None
+            else load_soc_dataset(data_path))
     return validate_dataset(data)
 
 
@@ -242,6 +243,8 @@ def run_pipeline(
     export_pdf: bool = False,
     narrate: bool = False,
     progress_callback=None,
+    strict_validation: bool = False,
+    limits=None,
 ):
     cfg = load_config(config_path)
     steps_completed = []
@@ -254,7 +257,8 @@ def run_pipeline(
             progress_callback(label)
 
     # ---- Load ----
-    data = load_soc_dataset(data_path)
+    data = (load_soc_dataset(data_path, limits) if limits is not None
+            else load_soc_dataset(data_path))
     done("Dataset loaded")
 
     # ---- Validate ----
@@ -264,7 +268,13 @@ def run_pipeline(
     # the desktop UI surfaced it as an opaque RuntimeError with the
     # actual reasons stranded in stdout.
     validation_report = validate_dataset(data)
-    if validation_report.has_errors:
+    # Warnings do not block by default: the validator's contract is to
+    # report everything wrong so a supervisor can send one complete list
+    # of corrections back, and a warning rarely makes a submission
+    # unanalysable. A supervisor who wants a stricter gate sets it.
+    blocked = (validation_report.issues if strict_validation
+               else validation_report.errors)
+    if blocked:
         raise DatasetValidationError(validation_report, data_path)
     done("Dataset validated")
 

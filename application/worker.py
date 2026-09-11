@@ -20,14 +20,16 @@ class ValidationWorker(QObject):
     finished = Signal(object)   # ValidationReport
     failed = Signal(str)        # unreadable / unsupported input
 
-    def __init__(self, dataset_path):
+    def __init__(self, dataset_path, app_settings=None):
         super().__init__()
         self.dataset_path = dataset_path
+        self.app_settings = app_settings
 
     @Slot()
     def run(self):
         try:
-            report = AssessmentService().validate(self.dataset_path)
+            report = AssessmentService(
+                settings=self.app_settings).validate(self.dataset_path)
             self.finished.emit(report)
         except IngestionError as exc:
             # Carries a message written for a supervisor, plus a remedy.
@@ -46,16 +48,18 @@ class AssessmentWorker(QObject):
         self,
         dataset_path,
         ai_config=None,
+        app_settings=None,
     ):
         super().__init__()
 
         self.dataset_path = dataset_path
         self.ai_config = ai_config
+        self.app_settings = app_settings
 
     @Slot()
     def run(self):
         try:
-            service = AssessmentService()
+            service = AssessmentService(settings=self.app_settings)
 
             result = service.run_assessment(
                 self.dataset_path,

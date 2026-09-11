@@ -737,6 +737,48 @@ def main():
     assert stored["geometry"]
     ok(f"geometry and last page ({stored['page_index']}) saved")
 
+    print("\n[16b] Settings: all sections present and wired")
+    window.show_page(7)
+    page = window.settings_page
+    for widget, name in (
+        (page.history_path_edit, "General: history location"),
+        (page.reopen_last_page_box, "General: reopen last page"),
+        (page.strict_validation_box, "Data: strict validation"),
+        (page.archive_size_spin, "Data: archive size limit"),
+        (page.archive_members_spin, "Data: archive member limit"),
+        (page.csv_exports_box, "Reports: CSV exports"),
+        (page.pdf_report_box, "Reports: PDF summary"),
+    ):
+        assert widget is not None, name
+    ok("General, Data and Reports controls present")
+
+    assert len(page.system_rows) == 8
+    page.set_system_info(window.system_information())
+    assert APP_VERSION in page.system_rows["version"].text()
+    assert "Not used" in page.system_rows["network"].text()
+    ok("System section reports version and offline status")
+
+    # A saved setting must reach the behaviour it names.
+    from application.services.app_settings import AppSettings as _AppSettings
+    import tempfile as _tempfile
+    relocated = _tempfile.mkdtemp(prefix="satsa-smoke-relocated-")
+    page.load_app_settings(_AppSettings(
+        history_directory=relocated, generate_pdf_report=False))
+    saved = page.save()
+    assert window.app_settings.history_directory == relocated
+    assert str(window.history.root) == relocated
+    ok("changing the history location moves the store immediately")
+
+    assert window.settings_service.load_app_settings().history_directory \
+        == relocated
+    ok("settings persisted to disk")
+
+    # Restore defaults so the rest of the run is unaffected.
+    page.load_app_settings(_AppSettings())
+    page.save()
+    assert window.app_settings.history_directory == ""
+    ok("reset restores the default history location")
+
     print("\n[17] About and System Information")
     before = len(window.notifications)
     window.show_about()

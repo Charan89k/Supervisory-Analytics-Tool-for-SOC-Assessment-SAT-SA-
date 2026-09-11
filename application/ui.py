@@ -137,6 +137,7 @@ class MainWindow(QMainWindow):
 
         self.settings_service = SettingsService()
         self.ai_config = self.settings_service.load_ai_config()
+        self.app_settings = self.settings_service.load_app_settings()
 
         self.findings = []
         self.review_queue = []
@@ -147,7 +148,9 @@ class MainWindow(QMainWindow):
         # run rather than a fixed folder, so Reports always shows the
         # artifacts of the assessment on screen — including when a past
         # assessment has been loaded from history.
-        self.history = HistoryService()
+        self.history = HistoryService(
+            Path(self.app_settings.history_directory)
+            if self.app_settings.history_directory else None)
         self.current_run = None
         self.output_dir = self.history.root
 
@@ -165,6 +168,8 @@ class MainWindow(QMainWindow):
         # and doing it inline meant the window did not appear until it
         # returned. Nothing depends on the result being ready sooner.
         QTimer.singleShot(0, self.refresh_ai_status)
+        QTimer.singleShot(0, lambda: self.settings_page.set_system_info(
+            self.system_information()))
 
     # ============================================================
     # UI
@@ -246,8 +251,9 @@ class MainWindow(QMainWindow):
         self.reports_page = self.build_reports_page()
         self.benchmark_page = self.build_benchmark_page()
         self.history_page = self.build_history_page()
-        self.settings_page = SettingsPage(self.ai_config)
+        self.settings_page = SettingsPage(self.ai_config, self.app_settings)
         self.settings_page.settings_saved.connect(self.ai_settings_saved)
+        self.settings_page.app_settings_saved.connect(self.app_settings_saved)
 
         self.pages.addWidget(self.dashboard_page)
         self.pages.addWidget(self.assessment_page)
@@ -429,25 +435,25 @@ class MainWindow(QMainWindow):
         )
 
     def show_system_information(self):
-        import platform
-        import sys
-
-        status = self.current_ai_status()
+        """
+        The same facts the Settings System section shows, derived from
+        one place so the two cannot disagree.
+        """
+        info = self.system_information()
+        self.settings_page.set_system_info(info)
 
         self.notify(
-            "info",
-            "System Information",
-            f"{APP_NAME} {APP_VERSION}\n\n"
-            f"Python           {sys.version.split()[0]}\n"
-            f"Platform         {platform.system()} {platform.release()}\n"
-            f"Machine          {platform.machine()}\n\n"
-            f"Settings file    {self.settings_service.path}\n"
-            f"Output folder    {self.output_dir}\n\n"
-            f"Dataset formats  {describe_supported_inputs()}\n\n"
-            f"AI backend       {status.backend}\n"
-            f"AI status        {status.label()}\n\n"
-            "Network          not used. SAT-SA makes no external "
-            "connections; the optional AI layer runs on this machine only.",
+            "info", "System Information",
+            "\n".join(f"{label:18}{info[key]}" for key, label in (
+                ("version", "Application"),
+                ("python", "Python"),
+                ("platform", "Platform"),
+                ("settings_file", "Settings file"),
+                ("history_directory", "Assessment history"),
+                ("formats", "Dataset formats"),
+                ("ai_status", "AI status"),
+                ("network", "Network"),
+            )),
         )
 
     # ============================================================
@@ -527,6 +533,9 @@ class MainWindow(QMainWindow):
                     geometry.encode("ascii")))
             except Exception:
                 pass
+
+        if not self.app_settings.reopen_last_page:
+            return
 
         index = stored.get("page_index", 0)
         # Never restore onto a results page: at launch there are no
@@ -1036,7 +1045,7 @@ class MainWindow(QMainWindow):
         self.set_validation_state("running", "Validating dataset...")
 
         self.validation_thread = QThread()
-        self.validation_worker = ValidationWorker(path)
+        self.validation_worker = ValidationWorker(path, self.app_settings)
         self.validation_worker.moveToThread(self.validation_thread)
 
         self.validation_thread.started.connect(self.validation_worker.run)
@@ -1138,6 +1147,7 @@ class MainWindow(QMainWindow):
         self.worker = AssessmentWorker(
             self.dataset_path,
             ai_config=ai_config,
+            app_settings=self.app_settings,
         )
 
         self.worker.moveToThread(
@@ -1307,6 +1317,41 @@ class MainWindow(QMainWindow):
             "Settings Saved",
             f"AI settings saved to:\n{self.settings_service.path}",
         )
+
+    def app_settings_saved(self, settings):
+        """
+        Apply the non-AI settings. Each one changes behaviour on the
+        next assessment; the history location takes effect immediately
+        so the History page reflects the new store.
+        """
+        self.app_settings = settings
+        self.settings_service.save_app_settings(settings)
+
+        self.history = HistoryService(
+            Path(settings.history_directory)
+            if settings.history_directory else None)
+
+        self.refresh_history()
+        self.settings_page.set_system_info(self.system_information())
+
+    def system_information(self) -> dict:
+        """Runtime facts, derived at display time so they cannot go stale."""
+        import platform
+        import sys
+
+        status = self.current_ai_status()
+        return {
+            "version": f"{APP_NAME} {APP_VERSION}",
+            "python": sys.version.split()[0],
+            "platform": f"{platform.system()} {platform.release()} "
+                        f"({platform.machine()})",
+            "settings_file": str(self.settings_service.path),
+            "history_directory": str(self.history.root),
+            "formats": describe_supported_inputs(),
+            "ai_status": status.label(),
+            "network": ("Not used. SAT-SA makes no external connections; "
+                        "the optional AI layer runs on this machine only."),
+        }
 
     def ai_toggle_changed(self, enabled):
         """The checkbox on the assessment page mirrors the stored config."""

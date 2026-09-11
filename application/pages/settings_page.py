@@ -12,6 +12,8 @@ the layout leaves room for them rather than pretending they exist.
 
 from __future__ import annotations
 
+from typing import Optional
+
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -31,8 +33,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from analytics.ingestion import describe_supported_inputs
 from analytics.narration.service import SEVERITY_SCOPES
 from application.services.ai_config import MODE_LABELS, MODELS, AIConfig
+from application.services.app_settings import AppSettings
 from application.services.narration_service import NarrationService
 
 #: Backend keys paired with what a supervisor should understand them to be.
@@ -54,12 +58,18 @@ class SettingsPage(QWidget):
     """Edits the AI configuration and reports live backend status."""
 
     settings_saved = Signal(object)   # AIConfig
+    app_settings_saved = Signal(object)   # AppSettings
 
-    def __init__(self, config: AIConfig):
+    def __init__(self, config: AIConfig,
+                  app_settings: Optional[AppSettings] = None,
+                  system_info: Optional[dict] = None):
         super().__init__()
         self.config = config
+        self.app_settings = app_settings or AppSettings()
+        self.system_info = system_info or {}
         self._build()
         self.load_from(config)
+        self.load_app_settings(self.app_settings)
 
         # Deferred past construction for the same reason the main window
         # defers its probe: a configured backend on an unreachable host
@@ -98,9 +108,13 @@ class SettingsPage(QWidget):
         layout.setContentsMargins(0, 0, 12, 0)
         layout.setSpacing(16)
 
+        layout.addWidget(self._general_group())
         layout.addWidget(self._ai_group())
         layout.addWidget(self._scope_group())
+        layout.addWidget(self._data_group())
+        layout.addWidget(self._reports_group())
         layout.addWidget(self._advanced_group())
+        layout.addWidget(self._system_group())
         layout.addStretch()
 
         scroll.setWidget(body)
@@ -124,6 +138,169 @@ class SettingsPage(QWidget):
         buttons.addWidget(self.reset_button)
         buttons.addWidget(self.save_button)
         outer.addLayout(buttons)
+
+    def _general_group(self) -> QGroupBox:
+        group = QGroupBox("General")
+        form = QFormLayout(group)
+        form.setSpacing(10)
+
+        row = QHBoxLayout()
+        self.history_path_edit = QLineEdit()
+        self.history_path_edit.setPlaceholderText(
+            "Default location — leave empty unless storing runs elsewhere")
+        browse = QPushButton("Browse…")
+        browse.setCursor(Qt.PointingHandCursor)
+        browse.clicked.connect(self.browse_history_directory)
+        row.addWidget(self.history_path_edit)
+        row.addWidget(browse)
+        holder = QWidget()
+        holder.setLayout(row)
+        row.setContentsMargins(0, 0, 0, 0)
+        form.addRow("Assessment history", holder)
+
+        note = QLabel(
+            "Completed assessments are stored here, each in its own "
+            "folder, and are never overwritten by a later run. Changing "
+            "this does not move existing assessments."
+        )
+        note.setObjectName("settings_note")
+        note.setWordWrap(True)
+        form.addRow("", note)
+
+        self.reopen_last_page_box = QCheckBox(
+            "Reopen the last page used when the application starts")
+        form.addRow(self.reopen_last_page_box)
+
+        return group
+
+    def _data_group(self) -> QGroupBox:
+        group = QGroupBox("Data")
+        form = QFormLayout(group)
+        form.setSpacing(10)
+
+        self.formats_label = QLabel(describe_supported_inputs())
+        self.formats_label.setObjectName("settings_note")
+        self.formats_label.setWordWrap(True)
+        form.addRow("Accepted formats", self.formats_label)
+
+        self.strict_validation_box = QCheckBox(
+            "Treat validation warnings as blocking")
+        form.addRow(self.strict_validation_box)
+
+        strict_note = QLabel(
+            "Off by default. Blocking errors always stop an assessment; "
+            "warnings are reported but do not, because a submission with "
+            "warnings is usually still analysable and the validator's "
+            "purpose is to report everything wrong at once."
+        )
+        strict_note.setObjectName("settings_note")
+        strict_note.setWordWrap(True)
+        form.addRow("", strict_note)
+
+        self.archive_size_spin = QDoubleSpinBox()
+        self.archive_size_spin.setRange(0.1, 64.0)
+        self.archive_size_spin.setSingleStep(0.5)
+        self.archive_size_spin.setDecimals(1)
+        self.archive_size_spin.setSuffix(" GB")
+        form.addRow("Maximum archive expansion", self.archive_size_spin)
+
+        self.archive_members_spin = QSpinBox()
+        self.archive_members_spin.setRange(10, 1_000_000)
+        self.archive_members_spin.setSingleStep(500)
+        form.addRow("Maximum files in an archive", self.archive_members_spin)
+
+        limits_note = QLabel(
+            "A submission is untrusted input. These bound how far an "
+            "archive may expand and how many files it may contain, so a "
+            "crafted archive fails fast instead of filling the disk."
+        )
+        limits_note.setObjectName("settings_note")
+        limits_note.setWordWrap(True)
+        form.addRow("", limits_note)
+
+        return group
+
+    def _reports_group(self) -> QGroupBox:
+        group = QGroupBox("Reports")
+        form = QFormLayout(group)
+        form.setSpacing(10)
+
+        self.csv_exports_box = QCheckBox(
+            "Write CSV exports with each assessment")
+        self.pdf_report_box = QCheckBox(
+            "Write the PDF executive summary with each assessment")
+        form.addRow(self.csv_exports_box)
+        form.addRow(self.pdf_report_box)
+
+        note = QLabel(
+            "Reports are written into the assessment's own folder, so "
+            "each run keeps its own. The full JSON results are always "
+            "written — everything else is derived from them."
+        )
+        note.setObjectName("settings_note")
+        note.setWordWrap(True)
+        form.addRow("", note)
+
+        return group
+
+    def _system_group(self) -> QGroupBox:
+        group = QGroupBox("System")
+        form = QFormLayout(group)
+        form.setSpacing(8)
+
+        self.system_rows = {}
+        for key, label in (
+            ("version", "Application"),
+            ("python", "Python"),
+            ("platform", "Platform"),
+            ("settings_file", "Settings file"),
+            ("history_directory", "Assessment history"),
+            ("formats", "Dataset formats"),
+            ("ai_status", "AI status"),
+            ("network", "Network"),
+        ):
+            value = QLabel("")
+            value.setObjectName("settings_note")
+            value.setWordWrap(True)
+            value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.system_rows[key] = value
+            form.addRow(label, value)
+
+        return group
+
+    def set_system_info(self, info: dict):
+        """Displayed, never stored — it cannot go stale against the app."""
+        self.system_info = info or {}
+        for key, widget in self.system_rows.items():
+            widget.setText(str(self.system_info.get(key, "—")))
+
+    def browse_history_directory(self):
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select a folder for assessment history", "")
+        if directory:
+            self.history_path_edit.setText(directory)
+
+    def load_app_settings(self, settings: AppSettings):
+        self.app_settings = settings
+        self.history_path_edit.setText(settings.history_directory)
+        self.reopen_last_page_box.setChecked(settings.reopen_last_page)
+        self.strict_validation_box.setChecked(settings.strict_validation)
+        self.archive_size_spin.setValue(settings.max_archive_gigabytes)
+        self.archive_members_spin.setValue(settings.max_archive_members)
+        self.csv_exports_box.setChecked(settings.generate_csv_exports)
+        self.pdf_report_box.setChecked(settings.generate_pdf_report)
+        self.set_system_info(self.system_info)
+
+    def to_app_settings(self) -> AppSettings:
+        return AppSettings(
+            history_directory=self.history_path_edit.text().strip(),
+            reopen_last_page=self.reopen_last_page_box.isChecked(),
+            generate_csv_exports=self.csv_exports_box.isChecked(),
+            generate_pdf_report=self.pdf_report_box.isChecked(),
+            strict_validation=self.strict_validation_box.isChecked(),
+            max_archive_gigabytes=self.archive_size_spin.value(),
+            max_archive_members=self.archive_members_spin.value(),
+        )
 
     def _ai_group(self) -> QGroupBox:
         group = QGroupBox("Local AI Explanations")
@@ -396,10 +573,14 @@ class SettingsPage(QWidget):
 
     def reset_defaults(self):
         self.load_from(AIConfig())
+        self.load_app_settings(AppSettings())
         self.status_hint.setText("Reset to defaults — not yet saved.")
 
     def save(self):
         self.config = self.to_config()
+        self.app_settings = self.to_app_settings()
         self.settings_saved.emit(self.config)
+        self.app_settings_saved.emit(self.app_settings)
         self.refresh_status()
+        self.status_hint.setText("Settings saved.")
         return self.config

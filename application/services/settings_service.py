@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from application.services.ai_config import AIConfig
+from application.services.app_settings import AppSettings
 
 APP_NAME = "SAT-SA"
 SETTINGS_FILENAME = "settings.json"
@@ -77,6 +78,33 @@ class SettingsService:
 
     def save_ai_config(self, config: AIConfig) -> Path:
         return self._write_section("ai", asdict(config))
+
+    # -- application -------------------------------------------------
+
+    def load_app_settings(self,
+                           default: Optional[AppSettings] = None) -> AppSettings:
+        """
+        Read the non-AI application settings.
+
+        Unknown keys are ignored and missing ones fall back to the
+        default, so a settings file written by an older or newer build
+        still loads rather than refusing to start.
+        """
+        fallback = default or AppSettings()
+        section = self._read_section("app")
+        if not isinstance(section, dict):
+            return fallback
+
+        known = set(asdict(fallback))
+        merged = {**asdict(fallback),
+                  **{k: v for k, v in section.items() if k in known}}
+        try:
+            return AppSettings(**merged)
+        except (TypeError, ValueError):
+            return fallback
+
+    def save_app_settings(self, settings: AppSettings) -> Path:
+        return self._write_section("app", settings.to_dict())
 
     # -- window ------------------------------------------------------
 
