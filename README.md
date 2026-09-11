@@ -1,220 +1,383 @@
 # SAT-SA — Supervisory Analytics Tool for SOC Assessment
 
-SAT-SA analyzes the operational records a SOC/CSE already produces —
-alerts, cases, escalations, evidence, telemetry — and surfaces where
-documented process didn't match what actually happened, and where
-expected evidence is missing entirely. It does **not** do intrusion
-detection or vulnerability scanning; it supervises the people and
-process running those tools.
+**Smart India Hackathon 2026 · Problem statement SIH26157 · NTRO / NCIIPC**
 
-## Why this exists
+An offline desktop application that helps a supervisor assess how well a
+Critical Sector Entity actually ran its Security Operations Centre —
+using the entity's own alert and case-management records as evidence.
 
-Two independent failure modes matter for supervisory assessment:
+It supports supervisory judgement. **It does not replace it.**
 
-- **Execution gaps** — a control or SLA exists, but the evidence
-  shows it wasn't followed (a HIGH alert closed in 3 minutes, an
-  escalation that was required but never initiated).
-- **Negative space** — evidence that *should* exist but doesn't (a
-  telemetry source with no data, a SOC with suspiciously low alert
-  volume, cases with no investigation notes at all). There's no row
-  to point to here — only an absence — so every negative-space rule
-  has to say what was expected and why.
+---
 
-Every finding carries three deliberately separate layers: `evidence`
-(raw numbers, no judgement), `finding_type`/`rule_id` (the
-deterministic, auditable rule outcome), and `rationale` (a
-human-readable *indicator*, phrased as "may suggest," never as an
-accusation). Supervisory judgement stays with the human reviewer.
+## The problem
 
-## Architecture
+The **National Critical Information Infrastructure Protection Centre**
+assesses the cyber resilience of **Critical Sector Entities** — banks,
+power utilities, telecoms, hospitals. Each runs a **Security Operations
+Centre**: analysts watching alerts, opening cases, escalating what
+matters.
+
+As part of an assessment, NCIIPC examiners read samples of those alert
+and case records by hand. That manual review consistently finds things
+no policy document, audit, self-assessment or KPI dashboard reveals — a
+CRITICAL alert closed in three minutes, an escalation the entity's own
+policy required that never happened, a telemetry source that has
+reported nothing for months.
+
+The purpose is not to assess individual alerts. The records are
+**operational evidence** about whether the entity has working
+capabilities: threat detection, investigation, escalation, incident
+response, security operations, governance, operational discipline,
+cyber resilience.
+
+**Manual review works but does not scale.** An examiner can read a
+sample of a few hundred records. A CSE produces hundreds of thousands,
+and there are many CSEs.
+
+## What SAT-SA does
+
+It reads a submission and finds two things a policy review cannot.
+
+**Execution gaps** — documented controls say one thing, the operational
+evidence shows another:
+
+> A CRITICAL alert was acknowledged at 02:14 and closed at 02:17 with no
+> investigation ever started. Response-time metrics look excellent.
+
+**Negative space** — evidence that *should* exist and does not:
+
+> Only 26 of 205 HIGH/CRITICAL alerts carry an escalation record of any
+> kind. Whether escalation happened cannot be determined either way.
+
+Then it ranks entities by risk, prioritises what a human should read
+first, and traces every finding back to the rows it came from.
 
 ```
-ingestion (CSV / JSON / ZIP / SQLite) -> validation -> normalization
-    -> metrics (alerts, analysts, cases, escalations, telemetry)
-    -> execution-gap detectors --\
-    -> negative-space detectors --+-> finding counts -> risk scoring -> peer benchmarking
-    -> supervisory review queue (ranks individual findings, not just entities)
-    -> evidence drill-down (traces any finding back to source records)
-    -> reporting (JSON / CSV / PDF)
-    -> local explanation layer (optional - restates findings in plain
-       language; never decides them)
-    -> PySide6 desktop application
+  SOC submission
+        │
+        ▼
+   Validation ──► Normalization ──► Metrics
+        │
+        ▼
+   Detection      9 execution-gap rules + 5 negative-space rules
+        │
+        ▼
+   Evidence  ·  Risk scoring  ·  Peer benchmarking  ·  Capability mapping
+        │
+        ▼
+   Review prioritisation      ~1,500 findings → 25 cases worth reading
+        │
+        ▼
+   HUMAN EXAMINER             forms the supervisory judgement
 ```
 
-Scoring is deliberately linear and auditable:
-`score = sum(weight_i * normalized_count_i)` - a supervisor can
-recompute any entity's score by hand from the finding counts in
-`config/assessment_rules.yaml`. No model sits between the findings
-and the final ranking.
+## What SAT-SA is not
 
-## Detection rules
+| It is not | |
+|---|---|
+| a SIEM | it does not collect or correlate logs |
+| a SOC | it does not detect intrusions |
+| real-time monitoring | it assesses periodic submissions, after the fact |
+| a centralised SOC | it holds no live connection to any entity |
+| autonomous response | it takes no action, ever |
+| a cloud or AI service | it runs entirely offline; see [AI.md](docs/AI.md) |
+| a replacement for the examiner | it prioritises and evidences; a human decides |
 
-**Execution gaps** (9): `MISSED_ESCALATION`, `SLOW_TRIAGE`,
-`FAST_CLOSURE`, `MISSING_EVIDENCE`, `REOPENED_CASE`,
-`REPETITIVE_INVESTIGATION`, `ANALYST_OVERLOAD`,
-`ACK_WITHOUT_INVESTIGATION`, `REPEATED_ALERT_WITHOUT_REMEDIATION`
-
-**Negative space** (5): `TELEMETRY_GAP`, `MISSING_ALERT_CATEGORY`,
-`LOW_ACTIVITY_OUTLIER`, `MISSING_ESCALATION_RECORDS`,
-`MISSING_INVESTIGATIONS`
-
-All thresholds live in `config/assessment_rules.yaml` - tunable
-without touching code, with every number commented.
-
-## The application
-
-**SAT-SA is a standalone offline desktop application.** It is not a web
-application, not a browser dashboard, and not a service. There is no
-server to start and no address to visit.
+## Quick start
 
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements-desktop.txt
 
 # Generate a synthetic dataset with seeded, reproducible ground truth
-python data/generator/generate_dataset.py --socs 5 --alerts-per-soc 800 --out data/synthetic
+python data/generator/generate_dataset.py --socs 5 --alerts-per-soc 800 \
+    --out data/synthetic
 
 # Launch SAT-SA
 python desktop.py
 ```
 
-The workflow inside the application:
+`python desktop.py` **is the application.** There is no server to start
+and no address to visit.
 
-```
-Launch -> Dashboard -> New Assessment -> select or drop a submission
-       -> validation result -> Run Assessment
-       -> Findings / Review Queue / Reports
-```
+Inside it: **New Assessment** → drop or browse to `data/synthetic` →
+validation runs automatically → **RUN ASSESSMENT** (~2 seconds) →
+Dashboard, Findings, Review Queue, Benchmarking and Reports unlock.
 
-Accepted submissions: a folder of CSV or JSON tables, a ZIP archive, a
-single JSON file, or a SQLite export. Archives are inspected for unsafe
-member paths and expansion limits before anything is written to disk.
+### System dependencies
+
+Linux needs Qt's platform libraries, which most desktops already have.
+If the window fails to open:
+
+```bash
+sudo pacman -S libxcb xcb-util-wm xcb-util-image xcb-util-keysyms \
+    xcb-util-renderutil libxkbcommon-x11          # Arch
+sudo apt install libxcb-xinerama0 libxkbcommon-x11-0 libegl1   # Debian/Ubuntu
+```
 
 ### Headless pipeline
 
-The same analytics run without a GUI, for scripted or batch assessment:
+The same analytics without a GUI:
 
 ```bash
 python main.py --data data/synthetic --out outputs --export-csv --export-pdf
+python main.py --data data/multi-period --out outputs --trends
+python main.py --data data/synthetic --out outputs --validate
 ```
 
-`main.py` flags:
-- `--export-csv` - writes `entity_risk_scores.csv`, `execution_gap_findings.csv`,
-  `negative_space_findings.csv`, `review_queue.csv` alongside the JSON output
-- `--export-pdf` - writes a one-page-per-entity `executive_summary.pdf`
-- `--narrate` - runs the top of the review queue through the local
-  explanation layer (see below). Falls back to the rule-generated
-  rationale whenever no local model is available, so the flag is always
-  safe to pass.
+`requirements.txt` installs the engine alone — no Qt, no display needed.
 
-### `app.py` is not the application
+## Accepted submissions
 
-`app.py` is a **legacy Streamlit dashboard**, kept only as a development
-and reference view of an assessment that has already been produced. It
-is not the product, it is not part of the deliverable, and it should not
-be used to evaluate SAT-SA: it runs a local web server, which the
-deployment requirements explicitly exclude. The desktop application
-(`desktop.py`) is the only supported interface.
+| Format | Notes |
+|---|---|
+| Folder of CSV tables | the primary format |
+| Folder of JSON tables | |
+| ZIP archive | inspected for unsafe paths and expansion before extraction |
+| Single JSON file | `{"alerts": [...], "cases": [...]}` |
+| SQLite export | opened read-only |
 
-## Local explanation layer — optional by design
+All five resolve to the same internal model — verified by test to
+produce byte-identical assessments. A folder of period subdirectories is
+assessed as multiple periods for trend analysis.
 
-An optional local language model can restate findings in plainer prose
-for a reviewer. It is architecturally incapable of doing more than that:
+See [DATA_FORMAT.md](docs/DATA_FORMAT.md).
 
-- **Never load-bearing.** Every finding already carries a deterministic,
-  rule-generated `rationale` before narration runs. Turn the layer off
-  entirely and the assessment output is identical in substance.
-- **Cannot alter a finding.** The narration service writes only
-  `narration_*` fields, and a backend is handed a defensive copy of the
-  finding rather than the authoritative record — so a backend that
-  mutates what it is given changes nothing. It cannot create, remove, or
-  re-score a finding, change a severity, or invent evidence.
-- **Fails without failing the assessment.** If no model is available the
-  application reports "AI unavailable" and every finding keeps its rule
-  rationale. The assessment still completes.
-- **Bounded by default.** An assessment produces ~1,500 findings; the
-  default sends **10** to the model, chosen by review-queue rank. Severity
-  is not the scope control — the queue is already almost entirely
-  Critical/High, so filtering on it bounds nothing.
+## Detection
 
-### Backends
+Every threshold lives in `config/assessment_rules.yaml` and is tunable
+without touching code.
+
+**Execution gaps (9)** — `MISSED_ESCALATION` · `SLOW_TRIAGE` ·
+`FAST_CLOSURE` · `MISSING_EVIDENCE` · `REOPENED_CASE` ·
+`REPETITIVE_INVESTIGATION` · `ANALYST_OVERLOAD` ·
+`ACK_WITHOUT_INVESTIGATION` · `REPEATED_ALERT_WITHOUT_REMEDIATION`
+
+**Negative space (5)** — `TELEMETRY_GAP` · `MISSING_ALERT_CATEGORY` ·
+`LOW_ACTIVITY_OUTLIER` · `MISSING_ESCALATION_RECORDS` ·
+`MISSING_INVESTIGATIONS`
+
+Every rule, its thresholds, its guards and its limitations:
+[ANALYTICS.md](docs/ANALYTICS.md).
+
+### Every finding carries three separate layers
 
 ```
-LocalLLMBackend
-├── LlamaCppBackend   shipped: a local .gguf file, no service to install
-├── OllamaBackend     development convenience on a workstation
-└── MockBackend       tests and demo: deterministic samples, no model
+evidence       raw structured facts. Never phrased as judgement.
+rule_id        the deterministic rule outcome.
+rationale      an INDICATOR — "may indicate", never "the analyst failed".
 ```
 
-`LlamaCppBackend` is the deployment path. The model is a **data file**
-that travels on the same media as the dataset, not installed software —
-an easier story for an air-gapped environment than a background service
-on a TCP port. Updating the model means replacing the file.
+And traces the whole way down:
 
-`MockBackend` produces deterministic sample text so the whole narration
-pipeline can be developed and tested without executing a multi-gigabyte
-model. Its output is labelled `[SAMPLE EXPLANATION]`, carries
-`is_mock=True`, and states that no language model was involved — it is
-never presentable as model analysis.
+```
+Finding → Rule → Rationale → Evidence → Source records
+```
 
-**Offline means local compute, not local speed.** A 7B model on a
-CPU-only laptop takes roughly 1-4 minutes per explanation. The AI layer
-is off by default, and the default model is `qwen2.5:7b` — never the
-14B, which needs ~9 GB resident.
+The last step re-reads the submission itself, so what an examiner
+verifies is the entity's own data — not something the pipeline copied.
 
-## Synthetic data & ground truth
+### Scoring is linear on purpose
 
-`data/generator/generate_dataset.py` seeds each SOC with one of five
-risk profiles so the dataset is defensible rather than arbitrary:
+```
+supervisory_risk_score = Σ ( weight × (count / alerts) × 100 )
+```
 
-- `clean` - low gap rates across the board
-- `typical` - moderate, realistic rates
-- `weak` - elevated execution-gap rates
-- `low_activity` - deliberately sparse alert volume, to exercise
-  `LOW_ACTIVITY_OUTLIER`
-- `poor_recordkeeping` - alerts/cases exist but escalation and
-  investigation records are largely absent, to exercise the two
-  record-keeping negative-space rules
+A supervisor can recompute any entity's score by hand. **No model sits
+between the findings and the ranking.**
+
+## The AI layer is optional and supplementary
+
+```
+Deterministic analytics → Finding + Evidence + Severity + Risk
+                                    │  ◄── AUTHORITATIVE
+                                    ▼
+                        Optional local Qwen model
+                                    │  ◄── SUPPLEMENTARY
+                                    ▼
+                          Human-readable explanation
+```
+
+The model **cannot** create, remove, or re-score a finding, change a
+severity or queue position, or invent evidence. It receives a defensive
+copy and can write nothing back; the UI keeps its output in a separate,
+clearly labelled panel outside the authoritative record.
+
+**AI is off by default.** With it disabled, unavailable, or crashed, the
+assessment completes identically — every finding keeps its
+rule-generated rationale. With it on, the default explains **10 of
+~1,500 findings**, chosen by review-queue rank.
+
+Backends: `llama.cpp` (shipped — a local `.gguf`, no service),
+Ollama (development), and a labelled sample explainer for tests.
+Details: [AI.md](docs/AI.md).
+
+## Validation
+
+```
+ALL RULES   1,698 seeded   1,460 TP   4 FP   99.7% precision   86.0% recall
+Ranking     100% of the top ten correspond to a seeded condition
+Effort      81 prioritised items from 1,481 findings over 3,296 alerts
+```
+
+> **Synthetic validation demonstrates that the implemented rules behave
+> according to their specification. It does not prove that the rules
+> represent expert supervisory judgement.**
+
+The generator injects the conditions the rules look for, so agreement
+between them is partly circular. No expert validation has been
+performed, and SAT-SA reports synthetic figures under that heading and
+no other. [VALIDATION.md](docs/VALIDATION.md) explains scope-aware
+recall, what a false positive means here, and the expert methodology.
+
+## Offline by design
+
+```
+  No Internet · No cloud · No external AI API · No telemetry
+```
+
+A grep for any URL across the product code returns exactly one result —
+`http://localhost`, for the optional local model. That check runs at the
+end of every development phase.
+
+[OFFLINE_DEPLOYMENT.md](docs/OFFLINE_DEPLOYMENT.md) covers air-gapped
+transfer, model installation, hardware requirements and the model update
+mechanism.
+
+## Security
+
+A submission is untrusted input. **Nothing in a dataset is ever
+executed.** Archives are inspected before a byte is written — traversal
+in six forms, symlink members, zip bombs, member counts, streaming size
+limits. Real malicious archives are built and run in the test suite.
+[SECURITY.md](docs/SECURITY.md).
 
 ## Testing
 
 ```bash
-pytest                                    # full suite
-python tests/smoke_ui.py                  # headless UI smoke test
+python -m pytest            # 396 tests, ~30s
+python tests/smoke_ui.py    # 100 UI checks, ~21s
 ```
 
-Every detection rule has both a positive case (fires) and a negative
-case (does not fire) - a rule that's only ever tested on cases where
-it should fire says nothing about its false-positive rate.
+**No test loads a language model.** [TESTING.md](docs/TESTING.md).
 
-Neither the suite nor the smoke test loads a language model. Roughly
-half the ingestion tests are adversarial, building genuinely malicious
-archives (path traversal, symlink members, zip bombs) and asserting
-nothing is written outside the extraction root.
+## Performance
 
-## Project layout
+Measured on an 8th-generation Intel Core i5 U-series laptop:
+
+| Dataset | Time | Findings |
+|---|---|---|
+| 3,296 alerts / 5 entities | 1.6s | 1,481 |
+| 27,800 alerts / 12 entities | 9.2s | 11,810 |
+
+## Project structure
 
 ```
-analytics/
-  ingestion/                                # CSV/JSON/ZIP/SQLite adapters + safe extraction
-  loader.py, validator.py, normalizer.py    # ingestion pipeline
-  narration/                                # local explanation backends
-  metrics/                                  # alert/analyst/case/escalation/telemetry metrics
-  detection/                                # execution_gaps.py, negative_space.py
-  scoring/                                  # score.py, benchmark.py
-  evidence.py                               # drill-down: alert_id/case_id -> full record bundle
-  review_queue.py                           # ranks individual findings for human review
-  llm_narration.py                          # offline Qwen explanation layer
-  reporting.py                              # CSV + PDF exports
-schemas/assessment_result.py                # output contract (dataclasses)
-data/generator/generate_dataset.py          # synthetic dataset with seeded ground truth
-config/assessment_rules.yaml                # every threshold, weight, and setting
-desktop.py                                  # THE APPLICATION — launch this
-application/                                # PySide6 desktop app
-  ui.py, session.py, version.py             #   window, lifecycle state, identity
-  pages/, widgets/, services/               #   settings page, drop zone, services
-main.py                                     # headless pipeline entrypoint
-app.py                                      # legacy Streamlit view — NOT the product
-tests/                                      # detectors, ingestion, narration,
-                                            #   pipeline, and a headless UI smoke test
+desktop.py                  THE APPLICATION — launch this
+main.py                     headless pipeline
+app.py                      legacy Streamlit view — NOT the product
+
+analytics/                  the engine; runs headless, no Qt
+  ingestion/                CSV · JSON · ZIP · SQLite + safe extraction
+  validator.py              structural checks
+  normalizer.py             build_alerts_enriched — the shared join
+  metrics/                  alert · analyst · case · escalation · telemetry
+  detection/                execution_gaps.py · negative_space.py
+  scoring/                  linear, hand-recomputable risk scores
+  evidence.py               finding → the submitted rows behind it
+  review_queue.py           case correlation and prioritisation
+  benchmarking.py           peer comparison within a sector
+  capabilities.py           findings → the eight supervisory areas
+  trends.py                 comparison across submission periods
+  validation.py             detection measured against ground truth
+  reporting.py              JSON · CSV · PDF
+  narration/                optional local model backends
+
+application/                PySide6 desktop application
+  ui.py                     MainWindow — eight pages
+  session.py                lifecycle state machine
+  pages/ widgets/ services/
+
+config/assessment_rules.yaml   every threshold, weight and mapping
+data/generator/                synthetic datasets with seeded ground truth
+tests/                         396 tests + the UI smoke test
+docs/                          the documents linked above
 ```
+
+## Configuration
+
+| What | Where |
+|---|---|
+| Rules, thresholds, weights, capability mapping | `config/assessment_rules.yaml` |
+| Application settings | `~/.config/SAT-SA/settings.json` |
+| Assessments | `assessments/<timestamp>/` — immutable |
+
+| Environment variable | Effect |
+|---|---|
+| `SATSA_NARRATION_BACKEND` | force a backend; `mock` guarantees no model loads |
+| `SATSA_ASSESSMENTS_DIR` | relocate assessment history |
+| `SATSA_CONFIG_DIR` | relocate the settings file |
+
+## Troubleshooting
+
+**The window does not open.** Install the Qt platform libraries above.
+Verify with `QT_QPA_PLATFORM=offscreen python tests/smoke_ui.py` — if
+that passes, the application works and the problem is the display.
+
+**"No ground_truth.json"** on `--validate`. Only synthetic datasets
+carry labels. A real submission cannot be validated this way, which says
+nothing about whether it contains findings.
+
+**"does not contain multiple period subdirectories"** on `--trends`.
+Generate with `--periods 4`.
+
+**AI shows NOT CONFIGURED.** Expected without a model. Install
+`llama-cpp-python`, point Settings at a `.gguf`, or select *Sample
+explanations* to see the flow with no model.
+
+**Peer benchmarking says the group is too small.** Fewer than three
+entities in a sector. Regenerate with more, e.g. `--socs 12`.
+
+**Tests fail after regenerating the dataset.** Expected if they assert
+exact counts. Run `pytest` fresh; fixtures build their own assessment.
+
+## Limitations
+
+- **No expert validation has been performed.** Figures are synthetic.
+- **`LlamaCppBackend.explain()` has not run against a real model.** It
+  is structurally sound and configuration-tested; the generation path
+  itself is unrun.
+- **Source drill-down runs on the UI thread** — ~0.2s typically, ~1s at
+  28,000 alerts, behind a wait cursor.
+- **Live database connections and API ingestion are not implemented.**
+  Named as planned; never offered by the UI.
+- **Trends need multiple periods.** A single period reports no trend
+  rather than drawing one through a point.
+- **`app.py` is a legacy Streamlit view**, kept for development only. It
+  is not the product and must not be used to evaluate SAT-SA.
+
+## Roadmap
+
+**Complete** — ingestion · validation · normalization · 14 detection
+rules · evidence drill-down · risk scoring · peer benchmarking ·
+capability mapping · trend analysis · review queue · assessment history ·
+settings · reporting · local AI layer · validation framework ·
+offline hardening · documentation
+
+**Remaining** — demo mode · packaging (Windows `.exe`, Linux AppImage) ·
+final QA
+
+## Documentation
+
+| Document | |
+|---|---|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | layers, pipeline, lifecycle, threading |
+| [ANALYTICS.md](docs/ANALYTICS.md) | all 14 rules with real thresholds |
+| [DATA_FORMAT.md](docs/DATA_FORMAT.md) | formats, internal model, validation |
+| [AI.md](docs/AI.md) | the safety boundary and backends |
+| [VALIDATION.md](docs/VALIDATION.md) | methodology and its limits |
+| [SECURITY.md](docs/SECURITY.md) | untrusted-input handling |
+| [OFFLINE_DEPLOYMENT.md](docs/OFFLINE_DEPLOYMENT.md) | air-gapped deployment |
+| [TESTING.md](docs/TESTING.md) | how to run and what is defended |
+| [CHANGELOG.md](CHANGELOG.md) | release history |
