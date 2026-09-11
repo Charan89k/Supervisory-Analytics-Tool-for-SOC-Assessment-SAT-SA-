@@ -198,7 +198,7 @@ An assessment produces roughly 1,500 findings. Explaining all of them at
   ~1,481 findings
         │
         ▼
-     81 prioritised review-queue items
+     84 prioritised review-queue items
         │
         ▼
      10 explained    ◄── max_explanations, the default

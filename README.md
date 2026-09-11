@@ -2,42 +2,70 @@
 
 **Smart India Hackathon 2026 · Problem statement SIH26157 · NTRO / NCIIPC**
 
-An offline desktop application that helps a supervisor assess how well a
-Critical Sector Entity actually ran its Security Operations Centre —
-using the entity's own alert and case-management records as evidence.
+An offline desktop application that helps a supervisory examiner assess how
+well a **Critical Sector Entity (CSE)** actually ran its Security Operations
+Centre — using the entity's own periodic alert and case-management submission
+as the evidence.
+
+Every finding is produced by a deterministic rule, carries the records it came
+from, and traces back to the submitted rows. An optional local language model
+may restate a finding in plainer words; it can never create, remove or re-rank
+one.
 
 It supports supervisory judgement. **It does not replace it.**
+
+> **v0.9.1** · 541 tests · 112 UI smoke checks · no network connection of any
+> kind, at any point.
+
+---
+
+## Contents
+
+| | |
+|---|---|
+| [The problem](#the-problem) | what SIH26157 asks for |
+| [What SAT-SA does](#what-sat-sa-does) | the solution, end to end |
+| [What SAT-SA is not](#what-sat-sa-is-not) | scope boundaries |
+| [Architecture](#architecture) | where the authority sits |
+| [Capabilities in v0.9.1](#capabilities-in-v091) | what is actually implemented |
+| [Installation](#installation) | source and packaged |
+| [Evaluator quick start](#evaluator-quick-start) | twelve steps |
+| [Detection](#detection) | the 14 rules and how they score |
+| [Evidence completeness](#evidence-completeness) | what the score cannot say |
+| [The AI layer](#the-ai-layer-is-optional-and-supplementary) | and its hard limits |
+| [Offline operation](#offline--air-gapped-operation) | air-gapped deployment |
+| [Validation](#validation) | measured, with its limits stated |
+| [Limitations](#limitations) | read this one |
 
 ---
 
 ## The problem
 
-The **National Critical Information Infrastructure Protection Centre**
-assesses the cyber resilience of **Critical Sector Entities** — banks,
-power utilities, telecoms, hospitals. Each runs a **Security Operations
-Centre**: analysts watching alerts, opening cases, escalating what
-matters.
+The **National Critical Information Infrastructure Protection Centre** assesses
+the cyber resilience of **Critical Sector Entities** — banks, power utilities,
+telecoms, hospitals. Each runs a Security Operations Centre: analysts watching
+alerts, opening cases, escalating what matters.
 
-As part of an assessment, NCIIPC examiners read samples of those alert
-and case records by hand. That manual review consistently finds things
-no policy document, audit, self-assessment or KPI dashboard reveals — a
-CRITICAL alert closed in three minutes, an escalation the entity's own
-policy required that never happened, a telemetry source that has
-reported nothing for months.
+As part of an assessment, NCIIPC examiners read samples of those alert and case
+records by hand. That manual review consistently finds things no policy
+document, audit, self-assessment or KPI dashboard reveals — a CRITICAL alert
+closed in three minutes, an escalation the entity's own policy required that
+never happened, a telemetry source that has reported nothing for months.
 
-The purpose is not to assess individual alerts. The records are
-**operational evidence** about whether the entity has working
-capabilities: threat detection, investigation, escalation, incident
-response, security operations, governance, operational discipline,
-cyber resilience.
+The purpose is not to assess individual alerts. The records are **operational
+evidence** about whether the entity has working capabilities: threat detection,
+investigation, escalation, incident response, security operations, governance,
+operational discipline, cyber resilience.
 
-**Manual review works but does not scale.** An examiner can read a
-sample of a few hundred records. A CSE produces hundreds of thousands,
-and there are many CSEs.
+**Manual review works but does not scale.** An examiner can read a sample of a
+few hundred records. A CSE produces hundreds of thousands, and there are many
+CSEs.
+
+---
 
 ## What SAT-SA does
 
-It reads a submission and finds two things a policy review cannot.
+It reads a periodic submission and surfaces what a policy review cannot.
 
 **Execution gaps** — documented controls say one thing, the operational
 evidence shows another:
@@ -47,30 +75,59 @@ evidence shows another:
 
 **Negative space** — evidence that *should* exist and does not:
 
-> Only 26 of 205 HIGH/CRITICAL alerts carry an escalation record of any
-> kind. Whether escalation happened cannot be determined either way.
+> Only 32 of 202 HIGH/CRITICAL alerts carry an escalation record of any kind.
+> Whether escalation happened cannot be determined either way.
 
-Then it ranks entities by risk, prioritises what a human should read
-first, and traces every finding back to the rows it came from.
+**Anomalies** — an entity or analyst that is a statistical outlier against
+comparable peers, not against the whole population.
+
+**Peer-relative deviation** — how an entity compares with others in its own
+sector, on rates normalised per 100 alerts.
+
+Then it ranks entities by risk, prioritises what a human should read first, and
+traces every finding back to the rows it came from.
 
 ```
-  SOC submission
+SOC submission (CSV / JSON / ZIP / SQLite)
         │
         ▼
-   Validation ──► Normalization ──► Metrics
+  Validation ─────────── structural checks; every issue reported together
         │
         ▼
-   Detection      9 execution-gap rules + 5 negative-space rules
+  Normalisation ──────── one internal model, whatever the input format
         │
         ▼
-   Evidence  ·  Risk scoring  ·  Peer benchmarking  ·  Capability mapping
+  Deterministic analytics
+        ├── Execution-gap detection      9 rules
+        ├── Negative-space detection     5 rules
+        └── Anomaly detection            z-scores against sector peers
         │
         ▼
-   Review prioritisation      ~1,500 findings → 25 cases worth reading
+  Evidence engine ────── every finding keeps the records behind it
         │
         ▼
-   HUMAN EXAMINER             forms the supervisory judgement
+  Risk scoring ───────── linear, hand-recomputable
+  Peer benchmarking ──── within sector, per 100 alerts
+  Evidence completeness  how much could be examined at all
+        │
+        ▼
+  Supervisory review queue ── correlated into cases, every CSE represented
+        │
+        ▼
+  Dashboard · Findings · Reports (JSON · CSV · PDF)
+        │
+        ▼
+  [optional] Local AI explanation — on request, never automatic
+        │
+        ▼
+  HUMAN EXAMINER ─────── forms the supervisory judgement
 ```
+
+**The deterministic layer is authoritative.** Everything a supervisor acts on
+comes from rules whose thresholds sit in one readable configuration file. The
+AI layer only rephrases what those rules already decided.
+
+---
 
 ## What SAT-SA is not
 
@@ -79,54 +136,155 @@ first, and traces every finding back to the rows it came from.
 | a SIEM | it does not collect or correlate logs |
 | a SOC | it does not detect intrusions |
 | real-time monitoring | it assesses periodic submissions, after the fact |
-| a centralised SOC | it holds no live connection to any entity |
+| continuous telemetry collection | it holds no live connection to any entity |
+| a national monitoring platform | it is an examiner's desktop tool |
 | autonomous response | it takes no action, ever |
-| a cloud or AI service | it runs entirely offline; see [AI.md](docs/AI.md) |
+| a cloud or SaaS AI service | it runs entirely offline; see [AI.md](docs/AI.md) |
 | a replacement for the examiner | it prioritises and evidences; a human decides |
 
-## Quick start
+---
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A["SOC submission<br/>CSV · JSON · ZIP · SQLite"] --> B[Validation and normalisation]
+    B --> C[Deterministic analytics]
+    C --> D1[Execution gaps]
+    C --> D2[Negative space]
+    C --> D3[Anomalies / outliers]
+    D1 --> E[Evidence engine]
+    D2 --> E
+    D3 --> E
+    E --> F["Risk scoring<br/>Peer benchmarking<br/>Evidence completeness"]
+    F --> G[Supervisory review queue]
+    G --> H[Dashboard · Findings · Reports]
+    H --> I[Human supervisory judgement]
+
+    H -. "read-only copy" .-> J["Optional local LLM<br/>Qwen via Ollama or llama.cpp"]
+    J -. "display text only" .-> H
+
+    style C fill:#12352a,stroke:#3f9e78,color:#eaf6f0
+    style E fill:#12352a,stroke:#3f9e78,color:#eaf6f0
+    style F fill:#12352a,stroke:#3f9e78,color:#eaf6f0
+    style G fill:#12352a,stroke:#3f9e78,color:#eaf6f0
+    style I fill:#16324f,stroke:#4a90d9,color:#eaf2fb
+    style J fill:#3d3212,stroke:#9e872f,color:#f6f2ea
+```
+
+The dashed path is the only place the AI appears. It receives a **defensive
+copy** of an already-decided finding and returns display text. It never sits
+between the data and the decision.
+
+Layers, threading and lifecycle: [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+---
+
+## Capabilities in v0.9.1
+
+| Capability | Status |
+|---|---|
+| Ingestion — CSV folder, JSON file, JSON folder, ZIP, SQLite | implemented |
+| Structural validation, all issues reported together | implemented |
+| Normalisation to one internal model across all formats | implemented |
+| Multi-table joining (`build_alerts_enriched`) | implemented |
+| Execution-gap detection — 9 rules | implemented |
+| Negative-space detection — 5 rules | implemented |
+| Anomaly detection — peer-relative z-scores | implemented |
+| Peer benchmarking within sector, per 100 alerts | implemented |
+| Linear risk scoring, hand-recomputable | implemented |
+| Evidence generation and drill-down to submitted rows | implemented |
+| Evidence completeness, reported beside the score | implemented |
+| Supervisory review queue with per-CSE coverage | implemented |
+| Findings explorer with filters and search | implemented |
+| Dashboard — ranking, drivers, capability mapping, trends | implemented |
+| Trend analysis across submission periods | implemented |
+| Reporting — JSON, CSV, PDF, trend JSON, validation text | implemented |
+| Multi-CSE assessment (verified at 30 entities) | implemented |
+| Assessment history — immutable, timestamped | implemented |
+| Detection validation against seeded ground truth | implemented |
+| Fully offline operation | implemented |
+| Optional local AI explanation (Ollama or llama.cpp) | implemented |
+| Installation self-check | implemented |
+| Windows `.exe` build | spec present; **not yet built** |
+
+---
+
+## Installation
+
+Step-by-step, including AI and troubleshooting:
+**[INSTALLATION.md](docs/INSTALLATION.md)**.
+
+### From source
 
 ```bash
-python -m venv venv && source venv/bin/activate
+python -m venv venv && source venv/bin/activate    # Windows: venv\Scripts\activate
 pip install -r requirements-desktop.txt
 
 # Generate a synthetic dataset with seeded, reproducible ground truth
 python data/generator/generate_dataset.py --socs 5 --alerts-per-soc 800 \
     --out data/synthetic
 
-# Launch SAT-SA
 python desktop.py
 ```
 
-`python desktop.py` **is the application.** There is no server to start
-and no address to visit.
+`python desktop.py` **is the application.** There is no server to start and no
+address to visit.
 
-Inside it: **New Assessment** → drop or browse to `data/synthetic` →
-validation runs automatically → **RUN ASSESSMENT** (~2 seconds) →
-Dashboard, Findings, Review Queue, Benchmarking and Reports unlock.
+Inside it: **New Assessment** → drop or browse to `data/synthetic` → validation
+runs automatically → **RUN ASSESSMENT** (~1.5 seconds) → Dashboard, Findings,
+Review Queue, Benchmarking and Reports unlock.
 
-### Demonstration mode
+Three dependency sets, so you install only what you need:
 
-**New Assessment → Run Demonstration Assessment** (or `Ctrl+D`) builds a
-synthetic submission and assesses it in about four seconds — nine
-entities, all fourteen rules firing, three comparable peer groups.
+| File | Installs | For |
+|---|---|---|
+| `requirements.txt` | pandas, pyyaml, reportlab, requests | headless engine (`main.py`) — no Qt, no display |
+| `requirements-desktop.txt` | the above + PySide6 | the desktop application |
+| `requirements-dev.txt` | the above + pytest, pyinstaller, streamlit, plotly | tests and packaging |
 
-It runs the **real pipeline**: the same ingestion, validation,
-normalisation, detection, evidence, scoring and reporting a real
-submission takes. Nothing is staged or precomputed. The only thing it
-changes is where the dataset came from, and the data is labelled as
-synthetic in the status bar, on the dashboard and in the dataset name.
+Ollama, Qwen and llama.cpp are **not** Python dependencies and appear in none
+of these files. The AI layer is optional and provisioned separately.
 
-### System dependencies
+### System dependencies (Linux)
 
-Linux needs Qt's platform libraries, which most desktops already have.
-If the window fails to open:
+Qt needs its platform libraries, which most desktops already have. If the
+window fails to open:
 
 ```bash
 sudo pacman -S libxcb xcb-util-wm xcb-util-image xcb-util-keysyms \
-    xcb-util-renderutil libxkbcommon-x11          # Arch
-sudo apt install libxcb-xinerama0 libxkbcommon-x11-0 libegl1   # Debian/Ubuntu
+    xcb-util-renderutil libxkbcommon-x11                        # Arch
+sudo apt install libxcb-xinerama0 libxkbcommon-x11-0 libegl1    # Debian/Ubuntu
 ```
+
+### Packaged Windows build
+
+The build produces a **folder**, not an installer. No Python is required on the
+target machine, and SAT-SA itself needs no administrator rights.
+
+```
+1. Extract the package somewhere writable — Documents\SAT-SA is a good choice.
+   Program Files is not: SAT-SA does not need elevation and does not ask for it.
+
+2. (Optional) Enable local AI — run once:
+       Right-click SAT-SA-Setup-AI.ps1  →  Run with PowerShell
+
+3. Verify the install:
+       SAT-SA.exe --self-check
+
+4. Launch:
+       SAT-SA.exe
+```
+
+If PowerShell blocks the script, use a **process-scoped** bypass that expires
+with the window — do not change the machine-wide policy:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\SAT-SA-Setup-AI.ps1
+```
+
+The `.exe` must be built **on Windows**; PyInstaller does not cross-compile.
+See [packaging/BUILD.md](packaging/BUILD.md).
 
 ### Headless pipeline
 
@@ -138,39 +296,93 @@ python main.py --data data/multi-period --out outputs --trends
 python main.py --data data/synthetic --out outputs --validate
 ```
 
-`requirements.txt` installs the engine alone — no Qt, no display needed.
+| Flag | Effect |
+|---|---|
+| `--data` | input dataset directory (default `./data/synthetic`) |
+| `--out` | where results are written (default `outputs`) |
+| `--config` | rules file (default `config/assessment_rules.yaml`) |
+| `--export-csv` | also write the flat CSV exports |
+| `--export-pdf` | also write the PDF executive summary |
+| `--validate` | measure detection against a labelled dataset's ground truth |
+| `--trends` | assess each period separately and compare |
+| `--narrate` | run the optional explanation layer |
+
+---
+
+## Evaluator quick start
+
+Twelve steps. Substitute `SAT-SA.exe` for `python desktop.py` on a packaged
+build.
+
+```bash
+# 1. Prepare
+python -m venv venv && source venv/bin/activate
+pip install -r requirements-desktop.txt
+
+# 2. Verify the installation — no assessment run, no model loaded
+python desktop.py --self-check
+
+# 3. Start SAT-SA
+python desktop.py
+```
+
+Then, inside the application:
+
+| # | Action | What to look for |
+|---|---|---|
+| 4 | **New Assessment → Run Demonstration Assessment** (`Ctrl+D`) | ~4 s: 15 synthetic CSEs, 4,942 alerts; banner marks the data synthetic |
+| 5 | **Dashboard** | 15 entities ranked, risk drivers, capability areas, `Evidence` column |
+| 6 | **Findings** | 2,860 findings; filter by entity, severity or rule |
+| 7 | Select a finding | rule id, hedged rationale, structured evidence |
+| 8 | **Load source records** | the submitted rows behind that finding |
+| 9 | **Review Queue** | 108 findings in 33 cases; every CSE represented |
+| 10 | **Benchmarking** | 3 peer groups of 5; deviation from peer median |
+| 11 | **Reports** | Executive Summary PDF, JSON, four CSVs, validation report |
+| 12 | **Review Queue → Explain Top Findings** | *optional* — only with a local model installed |
+
+To demonstrate offline operation, disconnect the network and repeat steps 4–11.
+Nothing changes.
+
+The demonstration runs the **real pipeline** — the same ingestion, validation,
+normalisation, detection, evidence, scoring and reporting a real submission
+takes. Nothing is staged or pre-computed. The only thing it changes is where
+the dataset came from, and that data is labelled synthetic in the status bar,
+on the dashboard and in the dataset name.
+
+---
 
 ## Accepted submissions
 
 | Format | Notes |
 |---|---|
 | Folder of CSV tables | the primary format |
-| Folder of JSON tables | |
-| ZIP archive | inspected for unsafe paths and expansion before extraction |
+| Folder of JSON tables | one array per table |
 | Single JSON file | `{"alerts": [...], "cases": [...]}` |
+| ZIP archive | inspected for unsafe paths and expansion before extraction |
 | SQLite export | opened read-only |
 
-All five resolve to the same internal model — verified by test to
-produce byte-identical assessments. A folder of period subdirectories is
-assessed as multiple periods for trend analysis.
+All five resolve to the same internal model — verified by test to produce
+byte-identical assessments. Nine tables are required and four optional. A
+folder of period subdirectories is assessed as multiple periods for trend
+analysis. See [DATA_FORMAT.md](docs/DATA_FORMAT.md).
 
-See [DATA_FORMAT.md](docs/DATA_FORMAT.md).
+---
 
 ## Detection
 
-Every threshold lives in `config/assessment_rules.yaml` and is tunable
-without touching code.
+Every threshold lives in `config/assessment_rules.yaml` and is tunable without
+touching code.
 
-**Execution gaps (9)** — `MISSED_ESCALATION` · `SLOW_TRIAGE` ·
-`FAST_CLOSURE` · `MISSING_EVIDENCE` · `REOPENED_CASE` ·
-`REPETITIVE_INVESTIGATION` · `ANALYST_OVERLOAD` ·
-`ACK_WITHOUT_INVESTIGATION` · `REPEATED_ALERT_WITHOUT_REMEDIATION`
+**Execution gaps (9)** — `MISSED_ESCALATION` · `SLOW_TRIAGE` · `FAST_CLOSURE` ·
+`MISSING_EVIDENCE` · `REOPENED_CASE` · `REPETITIVE_INVESTIGATION` ·
+`ANALYST_OVERLOAD` · `ACK_WITHOUT_INVESTIGATION` ·
+`REPEATED_ALERT_WITHOUT_REMEDIATION`
 
 **Negative space (5)** — `TELEMETRY_GAP` · `MISSING_ALERT_CATEGORY` ·
 `LOW_ACTIVITY_OUTLIER` · `MISSING_ESCALATION_RECORDS` ·
 `MISSING_INVESTIGATIONS`
 
-Every rule, its thresholds, its guards and its limitations:
+Each rule with its real thresholds, guards and limitations:
 [ANALYTICS.md](docs/ANALYTICS.md).
 
 ### Every finding carries three separate layers
@@ -187,8 +399,8 @@ And traces the whole way down:
 Finding → Rule → Rationale → Evidence → Source records
 ```
 
-The last step re-reads the submission itself, so what an examiner
-verifies is the entity's own data — not something the pipeline copied.
+The last step re-reads the submission itself, so what an examiner verifies is
+the entity's own data, not something the pipeline copied.
 
 ### Scoring is linear on purpose
 
@@ -196,106 +408,205 @@ verifies is the entity's own data — not something the pipeline copied.
 supervisory_risk_score = Σ ( weight × (count / alerts) × 100 )
 ```
 
-A supervisor can recompute any entity's score by hand. **No model sits
-between the findings and the ranking.**
+A supervisor can recompute any entity's score by hand. **No model sits between
+the findings and the ranking.**
+
+### The review queue covers every CSE
+
+Findings that share an alert are correlated into one case and ranked by the sum
+of their priorities. Selection is two-level: the globally highest-priority
+cases, **plus each entity's own worst case**, so a few high-volume entities
+cannot crowd the rest of the portfolio out of the worklist. On a 30-entity
+submission, all 30 are represented. An entity with no findings is not forced
+in — its absence is the correct supervisory statement about it.
+
+---
+
+## Evidence completeness
+
+The risk score answers *"what problems were detected?"*. It cannot answer
+*"how much of the expected assessment could be performed at all?"* — and those
+two come apart badly.
+
+Most rules read a record and ask whether it shows the right thing happened.
+**A record that was never written produces no finding.** So an entity with poor
+record-keeping can accumulate fewer findings — and therefore a *better* score —
+than one keeping good records over identical behaviour.
+
+SAT-SA reports, beside the risk score, how much of each submission the checks
+could actually run against, and names the rules a shortfall limits:
+
+```
+Risk score              what was detected
+Evidence completeness   how much could be examined at all
+```
+
+Completeness is **not** a risk score, is never folded into one, and never
+changes a finding, severity, weight or rank. A low figure is a reason to ask a
+question: it may equally reflect an incomplete export or a system that stores
+those records elsewhere.
+
+---
 
 ## The AI layer is optional and supplementary
 
 ```
 Deterministic analytics → Finding + Evidence + Severity + Risk
-                                    │  ◄── AUTHORITATIVE
-                                    ▼
+                                  │  ◄── AUTHORITATIVE
+                                  ▼
                         Optional local Qwen model
-                                    │  ◄── SUPPLEMENTARY
-                                    ▼
-                          Human-readable explanation
+                                  │  ◄── SUPPLEMENTARY
+                                  ▼
+                        Human-readable explanation
 ```
 
-The model **cannot** create, remove, or re-score a finding, change a
-severity or queue position, or invent evidence. It receives a defensive
-copy and can write nothing back; the UI keeps its output in a separate,
-clearly labelled panel outside the authoritative record.
-
-**AI is off by default.** With it disabled, unavailable, or crashed, the
-assessment completes identically — every finding keeps its
-rule-generated rationale. With it on, the default explains **10 of
-~1,500 findings**, chosen by review-queue rank.
+The model **cannot** create a finding, remove one, change a severity, a rule
+id, a score, a queue position or any evidence value, and cannot introduce a
+fact the evidence does not contain. It receives a defensive copy, and the
+service writes back nothing but `narration_*` fields — asserted by a test that
+hands it a deliberately hostile backend.
 
 **Explanations never run automatically.** An assessment takes seconds;
-explaining findings on a CPU takes minutes, and the output cannot change
-the result. So the assessment finishes, and the Review Queue offers
-**[ Explain Top Findings ]** when a supervisor wants them. Availability
-is detected automatically; generation is not.
+explaining findings on a CPU takes minutes and cannot change the result. The
+Review Queue offers **`Explain Top Findings`** when a supervisor wants them.
 
-Backends: **Ollama** (default — zero configuration, the runtime and
-model are discovered, nothing to type), **llama.cpp** (a local `.gguf`,
-no service or port — for environments where a resident daemon is not
-permitted), and a labelled sample explainer for tests. Neither real
-backend contacts the internet. Details: [AI.md](docs/AI.md).
+Three supported configurations:
+
+| | Runtime | Model | Use when |
+|---|---|---|---|
+| **A. No AI** | — | — | the default; the assessment is unaffected |
+| **B. Ollama** | local service on `127.0.0.1:11434` | `qwen2.5:7b` | easiest; zero configuration |
+| **C. llama.cpp** | in-process, no service, no port | local `.gguf` file | a resident daemon is not permitted |
+
+Under **B** nothing is asked of the user: the runtime is discovered through
+`PATH` and the platform's install locations, and the model list comes from the
+service's own loopback API. Status is one of `AI DISABLED`, `AI NOT INSTALLED`,
+`AI NOT RUNNING`, `AI MODEL MISSING`, `AI NOT CONFIGURED`,
+`SAMPLE EXPLANATIONS` or `AI READY` — each naming the single action that
+resolves it.
+
+Model choices are `qwen2.5:3b` (Fast), `qwen2.5:7b` (Balanced, default) and
+`qwen2.5:14b` (Deep). 14B needs roughly 9 GB resident and is never the default.
+
+Full detail and the safety argument: [AI.md](docs/AI.md).
+
+---
+
+## Offline / air-gapped operation
+
+SAT-SA makes **no external network connection** — no licensing check, no update
+check, no telemetry, no cloud AI. A grep for URLs across the product code
+returns exactly one result: `http://localhost`, the optional local AI runtime.
+
+| Component | Internet to prepare | Internet to run |
+|---|---|---|
+| Deterministic assessment | no | **no** |
+| Python dependencies | once, to download wheels | no |
+| Ollama runtime + model | once, to obtain the files | no |
+| llama.cpp + `.gguf` | once, to obtain the files | no |
+
+Nothing is downloaded automatically. `SAT-SA-Setup-AI.ps1` installs from files
+placed beside it and contacts the network only if you pass `-AllowDownload`
+explicitly, printing the exact URL first.
+
+For strict air-gapped AI:
+
+```
+SAT-SA → llama.cpp (in-process) → local .gguf file
+```
+
+No service, no listening port, no separate provisioning mechanism — the model
+is a data file that travels on the same media as the dataset. Procedure:
+[OFFLINE_DEPLOYMENT.md](docs/OFFLINE_DEPLOYMENT.md).
+
+---
 
 ## Validation
 
-```
-ALL RULES   1,698 seeded   1,460 TP   4 FP   99.7% precision   86.0% recall
-Ranking     100% of the top ten correspond to a seeded condition
-Effort      81 prioritised items from 1,481 findings over 3,296 alerts
-```
-
-> **Synthetic validation demonstrates that the implemented rules behave
-> according to their specification. It does not prove that the rules
-> represent expert supervisory judgement.**
-
-The generator injects the conditions the rules look for, so agreement
-between them is partly circular. No expert validation has been
-performed, and SAT-SA reports synthetic figures under that heading and
-no other. [VALIDATION.md](docs/VALIDATION.md) explains scope-aware
-recall, what a false positive means here, and the expert methodology.
-
-## Offline by design
+Detection is measured against conditions the dataset generator deliberately
+injected, on the reference dataset (5 entities, 3,296 alerts):
 
 ```
-  No Internet · No cloud · No external AI API · No telemetry
+ALL RULES   1,698 seeded   1,460 TP   4 FP   238 FN   99.7% precision   86.0% recall
+Ranking     84 queue items, 84 correspond to a seeded condition (100.0%)
+            of the top 10 by queue rank, 10 correspond to a seeded condition
+Effort      84 prioritised items from 1,481 findings over 3,296 alerts —
+            a supervisor reads 2.55% of the alert population to reach the queue
 ```
 
-A grep for any URL across the product code returns exactly one result —
-`http://localhost`, for the optional local model. That check runs at the
-end of every development phase.
+**Synthetic ground truth is not expert validation.** The generator injects the
+conditions the rules look for, so agreement between them is partly circular:
+these figures show the rules behave as specified, not that the specification
+matches what an examiner would find. **No independent expert review has been
+performed.**
 
-[OFFLINE_DEPLOYMENT.md](docs/OFFLINE_DEPLOYMENT.md) covers air-gapped
-transfer, model installation, hardware requirements and the model update
-mechanism.
+Where a rule declines to fire outside its declared scope, recall is also
+reported *in scope* — `ACK_WITHOUT_INVESTIGATION` reads 26.5% overall and 100%
+against the conditions it can actually fire on.
+
+Methodology and limits: [VALIDATION.md](docs/VALIDATION.md).
+
+---
+
+## Performance
+
+Measured on an 8th-generation Intel Core i5 U-series laptop, 20 GB RAM, single
+process. **A local benchmark on the development environment — not a capacity
+guarantee.**
+
+| Dataset | Assessment | Findings | Peak memory |
+|---|---|---|---|
+| 3,296 alerts / 5 entities | 1.5 s | 1,481 | — |
+| 4,942 alerts / 15 entities (demonstration) | 2.9 s | 2,860 | — |
+| 58,240 alerts / 30 entities | 21.0 s | 29,836 | 373 MB |
+
+The desktop application stays responsive at that scale: page switches are
+sub-100 ms with 29,836 findings loaded.
+
+---
 
 ## Security
 
-A submission is untrusted input. **Nothing in a dataset is ever
-executed.** Archives are inspected before a byte is written — traversal
-in six forms, symlink members, zip bombs, member counts, streaming size
-limits. Real malicious archives are built and run in the test suite.
-[SECURITY.md](docs/SECURITY.md).
+Submissions are treated as **untrusted input**. Implemented protections,
+validated by tests:
+
+- ZIP archives are never `extractall`-ed. Members are inspected first for
+  parent-directory traversal, absolute paths, Windows drive-letter paths, UNC
+  paths, control and null bytes, and symlinks or any other non-regular entry.
+- Member count, per-member size, total uncompressed size and compression ratio
+  are capped, and extraction is streamed so a bomb is stopped mid-write.
+- Only `.csv`, `.json`, `.sqlite`, `.db` and `.sqlite3` members are extracted.
+  No dataset member is ever executed.
+- SQLite exports are opened **read-only** through a `file:` URI, with extension
+  loading left disabled.
+- The optional AI layer talks only to a loopback address.
+
+These are implemented protections designed to reduce specific risks, not a
+claim that the application is secure in an absolute sense. Threat model and
+test coverage: [SECURITY.md](docs/SECURITY.md).
+
+---
 
 ## Testing
 
 ```bash
-python -m pytest            # 396 tests, ~30s
-python tests/smoke_ui.py    # 100 UI checks, ~21s
+pytest                                              # 541 tests
+QT_QPA_PLATFORM=offscreen python tests/smoke_ui.py  # 112 UI checks
+python desktop.py --self-check                      # installation check
 ```
 
-**No test loads a language model.** [TESTING.md](docs/TESTING.md).
+No automated run loads a language model: `tests/conftest.py` forces
+`SATSA_NARRATION_BACKEND=mock` for the whole session, and the UI smoke test
+sets it before any import. What each suite defends:
+[TESTING.md](docs/TESTING.md).
 
-## Performance
-
-Measured on an 8th-generation Intel Core i5 U-series laptop:
-
-| Dataset | Time | Findings |
-|---|---|---|
-| 3,296 alerts / 5 entities | 1.6s | 1,481 |
-| 27,800 alerts / 12 entities | 9.2s | 11,810 |
+---
 
 ## Project structure
 
 ```
 desktop.py                  THE APPLICATION — launch this
-main.py                     headless pipeline
+main.py                     headless pipeline (CLI)
 app.py                      legacy Streamlit view — NOT the product
 
 analytics/                  the engine; runs headless, no Qt
@@ -305,6 +616,7 @@ analytics/                  the engine; runs headless, no Qt
   metrics/                  alert · analyst · case · escalation · telemetry
   detection/                execution_gaps.py · negative_space.py
   scoring/                  linear, hand-recomputable risk scores
+  completeness.py           how much of a submission could be examined
   evidence.py               finding → the submitted rows behind it
   review_queue.py           case correlation and prioritisation
   benchmarking.py           peer comparison within a sector
@@ -317,21 +629,28 @@ analytics/                  the engine; runs headless, no Qt
 application/                PySide6 desktop application
   ui.py                     MainWindow — eight pages
   session.py                lifecycle state machine
+  paths.py                  bundled resources vs. writable storage
+  self_check.py             --self-check
   pages/ widgets/ services/
 
 config/assessment_rules.yaml   every threshold, weight and mapping
 data/generator/                synthetic datasets with seeded ground truth
-tests/                         396 tests + the UI smoke test
-docs/                          the documents linked above
+packaging/                     PyInstaller spec, AI setup script, install docs
+schemas/                       assessment result schema
+tests/                         541 tests + the UI smoke test
+docs/                          the documents linked below
 ```
+
+---
 
 ## Configuration
 
 | What | Where |
 |---|---|
 | Rules, thresholds, weights, capability mapping | `config/assessment_rules.yaml` |
-| Application settings | `~/.config/SAT-SA/settings.json` |
-| Assessments | `assessments/<timestamp>/` — immutable |
+| Application settings | `~/.config/SAT-SA/settings.json` · Windows `%APPDATA%\SAT-SA\` |
+| Assessments, from source | `assessments/<timestamp>/` — immutable |
+| Assessments, packaged | `Documents\SAT-SA\assessments\` |
 
 | Environment variable | Effect |
 |---|---|
@@ -339,60 +658,87 @@ docs/                          the documents linked above
 | `SATSA_ASSESSMENTS_DIR` | relocate assessment history |
 | `SATSA_CONFIG_DIR` | relocate the settings file |
 
+---
+
 ## Troubleshooting
 
-**The window does not open.** Install the Qt platform libraries above.
-Verify with `QT_QPA_PLATFORM=offscreen python tests/smoke_ui.py` — if
-that passes, the application works and the problem is the display.
+**The window does not open.** Install the Qt platform libraries listed under
+Installation. Verify with
+`QT_QPA_PLATFORM=offscreen python tests/smoke_ui.py` — if that passes, the
+application works and the problem is the display.
 
-**"No ground_truth.json"** on `--validate`. Only synthetic datasets
-carry labels. A real submission cannot be validated this way, which says
-nothing about whether it contains findings.
+**"No ground_truth.json" on `--validate`.** Only generated datasets carry
+labels. A real submission cannot be validated this way, which says nothing
+about whether it contains findings.
 
-**"does not contain multiple period subdirectories"** on `--trends`.
-Generate with `--periods 4`.
+**"does not contain multiple period subdirectories" on `--trends`.** Generate
+with `--periods 4`.
 
-**AI shows NOT INSTALLED / NOT RUNNING / MODEL MISSING.** Expected
-without a local runtime, and never a problem for an assessment. Each
-state names the one action that resolves it; on a packaged install that
-action is usually running `SAT-SA-Setup-AI` once. `SAT-SA --self-check`
-reports the current state and writes it to a file.
+**AI shows NOT INSTALLED / NOT RUNNING / MODEL MISSING.** Expected without a
+local runtime, and never a problem for an assessment. Each state names the one
+action that resolves it; on a packaged install that is usually running
+`SAT-SA-Setup-AI` once. `--self-check` reports the current state.
 
-**Peer benchmarking says the group is too small.** Fewer than three
-entities in a sector. Regenerate with more, e.g. `--socs 12`.
+**Peer benchmarking says a group is too small.** Peer comparison needs at least
+three entities in a sector, and the sector-relative rules need five. The
+generator creates groups of at least five — regenerate with more entities,
+e.g. `--socs 15`.
 
-**Tests fail after regenerating the dataset.** Expected if they assert
-exact counts. Run `pytest` fresh; fixtures build their own assessment.
+**Tests fail after regenerating the dataset.** Run `pytest` fresh; the fixtures
+build their own assessment in a temporary directory.
+
+---
 
 ## Limitations
 
-- **No expert validation has been performed.** Figures are synthetic.
-- **`LlamaCppBackend.explain()` has not run against a real model.** It
-  is structurally sound and configuration-tested; the generation path
-  itself is unrun.
-- **Source drill-down runs on the UI thread** — ~0.2s typically, ~1s at
-  28,000 alerts, behind a wait cursor.
+- **No independent expert validation has been performed.** Every accuracy
+  figure is measured against synthetic, seeded ground truth and is partly
+  circular.
+- **SAT-SA assesses periodic submissions, after the fact.** It is not a
+  monitoring tool and has no live view of anything.
+- **The human examiner remains authoritative.** Every finding is an indicator
+  for review; none is a determination of fault.
+- **What can be assessed depends on what was submitted.** Rules that read a
+  record cannot fire when the record is absent — which is why evidence
+  completeness is reported alongside the score.
+- **Detection is scope-limited by design.** Fourteen rules cover the conditions
+  the problem statement names; they are not an exhaustive model of SOC quality.
+- **`LlamaCppBackend.explain()` has not been run against a real model.** It is
+  structurally sound and configuration-tested; the generation path is unrun.
+- **The Windows `.exe` has not been built.** The PyInstaller spec is present and
+  a Linux build from it has been verified end to end, but PyInstaller cannot
+  cross-compile.
+- **The performance figures are a local benchmark**, not a production capacity
+  guarantee.
+- **Trends need multiple periods.** A single period reports no trend rather
+  than drawing a line through one point.
+- **Source drill-down runs on the UI thread** — roughly 0.2 s typically, ~1 s
+  at 28,000 alerts, behind a wait cursor.
 - **Live database connections and API ingestion are not implemented.**
-  Named as planned; never offered by the UI.
-- **Trends need multiple periods.** A single period reports no trend
-  rather than drawing one through a point.
-- **`app.py` is a legacy Streamlit view**, kept for development only. It
-  is not the product and must not be used to evaluate SAT-SA.
+- **`app.py` is a legacy Streamlit view** kept for development only. It is not
+  the product and must not be used to evaluate SAT-SA.
 
-## Roadmap
+---
 
-**Complete** — ingestion · validation · normalization · 14 detection
-rules · evidence drill-down · risk scoring · peer benchmarking ·
-capability mapping · trend analysis · review queue · assessment history ·
-settings · reporting · local AI layer · validation framework ·
-offline hardening · documentation · demonstration mode
+## Demonstration flow
 
-**Remaining** — packaging (Windows `.exe`, Linux AppImage) · final QA
+For a short presentation:
+
+```
+Problem  →  Dataset  →  Assessment  →  Dashboard  →  Findings  →  Evidence
+         →  Review Queue  →  Report  →  [optional AI]  →  Offline
+```
+
+`Ctrl+D` runs the whole demonstration through the real pipeline in about four
+seconds.
+
+---
 
 ## Documentation
 
 | Document | |
 |---|---|
+| [INSTALLATION.md](docs/INSTALLATION.md) | source, packaged, AI, self-check |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | layers, pipeline, lifecycle, threading |
 | [ANALYTICS.md](docs/ANALYTICS.md) | all 14 rules with real thresholds |
 | [DATA_FORMAT.md](docs/DATA_FORMAT.md) | formats, internal model, validation |
@@ -401,4 +747,6 @@ offline hardening · documentation · demonstration mode
 | [SECURITY.md](docs/SECURITY.md) | untrusted-input handling |
 | [OFFLINE_DEPLOYMENT.md](docs/OFFLINE_DEPLOYMENT.md) | air-gapped deployment |
 | [TESTING.md](docs/TESTING.md) | how to run and what is defended |
+| [packaging/BUILD.md](packaging/BUILD.md) | building the distributable |
 | [CHANGELOG.md](CHANGELOG.md) | release history |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | development conventions |

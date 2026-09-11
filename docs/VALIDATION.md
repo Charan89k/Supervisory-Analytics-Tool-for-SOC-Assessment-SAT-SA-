@@ -62,7 +62,7 @@ Writes `validation_report.txt` beside the assessment.
 ```
 ALL RULES   1,698 seeded   1,460 TP   4 FP   238 FN   99.7% precision   86.0% recall
 Ranking     100% of the top ten correspond to a seeded condition
-Effort      81 prioritised items from 1,481 findings over 3,296 alerts
+Effort      84 prioritised items from 1,481 findings over 3,296 alerts
 ```
 
 Rules with no threshold that could legitimately suppress a seeded case —

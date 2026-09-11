@@ -13,30 +13,58 @@ multi-gigabyte model or depend on what is installed on the machine.
 
 | | |
 |---|---|
-| Test suite | **396 tests**, ~30s |
-| UI smoke test | **100 checks**, ~21s |
+| Test suite | **541 tests**, ~50s |
+| UI smoke test | **112 checks**, ~25s |
 | Model processes spawned | **0** |
 
 | File | Tests | Covers |
 |---|---:|---|
 | `test_detectors.py` | 48 | every rule: fires **and** does not fire |
 | `test_ingestion.py` | 43 | formats + adversarial archives |
+| `test_narration.py` | 30 | backends, scope, the never-alters invariant |
 | `test_dashboard.py` | 30 | dashboard computation, peer caveats |
-| `test_narration.py` | 29 | backends, scope, the never-alters invariant |
 | `test_ai_integration.py` | 26 | disabled / unavailable / mock / cancellation |
 | `test_review_queue.py` | 24 | case correlation and prioritisation |
+| `test_ollama_runtime.py` | 24 | runtime discovery, all four AI states |
 | `test_validation.py` | 22 | ground truth, scope-aware recall, honesty |
 | `test_session.py` | 22 | lifecycle, narration boundary, settings |
 | `test_reporting.py` | 22 | PDF sections, CSV exports, layering |
 | `test_history.py` | 22 | immutability of stored assessments |
-| `test_capabilities.py` | 20 | mapping completeness, no double counting |
-| `test_trends.py` | 19 | trend direction, never fabricated |
-| `test_pipeline.py` | 19 | end to end, multi-period |
-| `test_traceability.py` | 17 | finding → rule → evidence → source |
-| `test_benchmarking.py` | 17 | peer comparison honesty |
-| `test_app_settings.py` | 16 | every setting changes behaviour |
+| `test_demo.py` | 21 | demonstration mode uses the real pipeline |
+| `test_validation_exposure.py` | 20 | validation in the GUI, and its boundary |
+| `test_capabilities.py` | 20 | rule → supervisory area mapping |
+| `test_trends.py` | 19 | trend arithmetic; no fabricated direction |
+| `test_pipeline.py` | 19 | end-to-end assessment |
+| `test_traceability.py` | 17 | finding → rule → evidence → source rows |
+| `test_completeness.py` | 17 | evidence completeness, and that it scores nothing |
+| `test_benchmarking.py` | 17 | peer groups, medians, small-group caveats |
+| `test_app_settings.py` | 16 | settings persistence |
+| `test_queue_coverage.py` | 13 | no CSE starved out of the review queue |
+| `test_low_activity_baseline.py` | 13 | sector-relative volume outliers |
+| `test_report_discovery.py` | 12 | single- and multi-period report artifacts |
+| `test_packaging.py` | 10 | frozen-build paths, self-check |
+| `test_missing_category_baseline.py` | 10 | sector-relative category coverage |
+| `test_trend_ground_truth.py` | 4 | seeded trajectories hold across periods |
+| **Total** | **541** | |
 
-Roughly 5,900 lines of test code against 12,500 lines of product code.
+Plus `tests/smoke_ui.py` — **112 checks** driving the real `MainWindow`
+offscreen, from dataset load through assessment, findings, evidence
+drill-down, review queue, reports, history and settings.
+
+## By category
+
+| Category | Where |
+|---|---|
+| Unit — detectors, scoring, trends, capabilities | `test_detectors.py`, `test_trends.py`, `test_capabilities.py` |
+| Integration — full pipeline, traceability | `test_pipeline.py`, `test_traceability.py` |
+| Ingestion security — hostile archives | `test_ingestion.py` |
+| AI boundary — the LLM alters nothing | `test_narration.py`, `test_ai_integration.py`, `test_ollama_runtime.py` |
+| Peer-relative analytics | `test_low_activity_baseline.py`, `test_missing_category_baseline.py`, `test_benchmarking.py` |
+| Supervisory coverage | `test_queue_coverage.py` |
+| Evidence completeness | `test_completeness.py` |
+| Validation framework | `test_validation.py`, `test_validation_exposure.py` |
+| Packaging and frozen paths | `test_packaging.py` |
+| UI behaviour | `tests/smoke_ui.py` |
 
 ## What the tests are actually defending
 
@@ -54,6 +82,18 @@ extraction root.
 **The AI boundary.** A deliberately hostile backend that rewrites
 severity, priority, rule_id and nested evidence on everything handed to
 it is asserted to change nothing.
+
+**No CSE is starved.** A few high-volume entities filling the global
+queue must not push every other entity out of the supervisor's worklist,
+and an entity with nothing to review must not be padded into it.
+
+**Peer baselines stay peer-relative.** Both sector-sensitive rules are
+tested against the pooled comparison they replaced, including the case
+where pooling masks a genuine blind spot.
+
+**Evidence completeness scores nothing.** The assessment must be
+identical with and without it; no finding may carry a completeness
+field, and it may never appear as a weighted component.
 
 **History immutability.** Four runs created in a tight loop must get
 four directories; an earlier run must survive a later one.
@@ -104,10 +144,13 @@ See [VALIDATION.md](VALIDATION.md).
 
 Measured on an 8th-generation Intel Core i5 U-series laptop:
 
-| Dataset | Time | Findings |
-|---|---|---|
-| 3,296 alerts / 5 entities | 1.6s | 1,481 |
-| 27,800 alerts / 12 entities | 9.2s | 11,810 |
+| Dataset | Time | Findings | Peak memory |
+|---|---|---|---|
+| 3,296 alerts / 5 entities | 1.5s | 1,481 | — |
+| 4,942 alerts / 15 entities (demonstration) | 2.9s | 2,860 | — |
+| 58,240 alerts / 30 entities | 21.0s | 29,836 | 373 MB |
+
+A local benchmark on the development machine, not a capacity guarantee.
 
 ## Notes for contributors
 

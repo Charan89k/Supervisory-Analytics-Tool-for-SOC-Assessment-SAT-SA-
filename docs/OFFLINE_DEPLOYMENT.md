@@ -171,12 +171,14 @@ all, and nothing about the assessment changes without one.
 | | |
 |---|---|
 | CPU | any x86-64 or ARM64; the pipeline is single-process |
-| RAM | 4 GB comfortably handles ~28,000 alerts |
+| RAM | 4 GB comfortably handles ~58,000 alerts (373 MB measured) |
 | Disk | ~50 MB application; assessments are a few MB each |
 | Display | required for the desktop app; `main.py` runs headless |
 
-Measured: **3,296 alerts in 1.6s**; **27,800 alerts across 12 entities in
-9.2s**, on an 8th-generation Intel Core i5 U-series laptop.
+Measured on an 8th-generation Intel Core i5 U-series laptop, 20 GB RAM:
+**3,296 alerts across 5 entities in 1.5s**, and **58,240 alerts across 30
+entities in 21.0s** at 373 MB peak. A local benchmark, not a capacity
+guarantee.
 
 **Optional AI layer**, additional:
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SAT-SA Analytics Engine v0.1 — end-to-end pipeline.
+SAT-SA analytics engine — end-to-end pipeline.
 
 Usage:
     python main.py --data ./data/synthetic
@@ -39,6 +39,10 @@ from analytics.review_queue import build_review_queue
 from analytics.llm_narration import narrate_queue
 from analytics.narration import resolve_backend_name
 from analytics.reporting import write_csv_exports, write_pdf_report
+
+# Version only. A constants module with no imports of its own, so the
+# headless engine keeps working on a core-only install with no PySide6.
+from application.version import APP_VERSION
 from analytics.trends import build_trends
 from analytics.validation import (
     format_report,
@@ -438,7 +442,8 @@ def run_pipeline(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SAT-SA Analytics Engine v0.1")
+    parser = argparse.ArgumentParser(
+        description=f"SAT-SA analytics engine v{APP_VERSION} — headless assessment pipeline.")
     parser.add_argument("--data", default="./data/synthetic", help="Path to input dataset directory")
     parser.add_argument("--out", default="outputs", help="Path to write results")
     parser.add_argument("--config", default="config/assessment_rules.yaml", help="Path to rules config")

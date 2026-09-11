@@ -178,9 +178,18 @@ what was expected and why.
 
 #### `MISSING_ALERT_CATEGORY` — `CATEGORY-PEER-COVERAGE-001`
 - **Capability area:** Threat Detection · **Weight:** 1.5
-- **Fires when:** an alert category present for a strong majority of
-  peers was not observed for this entity.
+- **Fires when:** an alert category present for a strong majority of the
+  entity's **own sector peer group** was not observed for this entity.
 - **Configured:** `missing_category_peer_presence_fraction = 0.6`
+- **Peer-relative, not global.** "Expected" only means something against
+  comparable entities: an energy CSE not reporting a category every
+  healthcare CSE reports says nothing. Pooling sectors fails in both
+  directions — it invents gaps that are normal for another sector, and
+  dilutes real ones below the threshold.
+- **Guard:** a peer group below 3 entities is not assessed. "Present for
+  a strong majority of peers" is not a claim two entities can support.
+- **Evidence:** names the peer group, its size, how many peers report the
+  category, and the threshold.
 - **Limitation:** may reflect a different technology footprint rather
   than a monitoring gap. It is an indicator for review.
 
@@ -188,9 +197,24 @@ what was expected and why.
 
 #### `LOW_ACTIVITY_OUTLIER` — `VOLUME-ZSCORE-001`
 - **Capability area:** Cyber Resilience · **Weight:** 2.0
-- **Fires when:** entity alert volume is a z-score outlier below the
-  peer mean.
+- **Fires when:** entity alert volume is a z-score outlier below the mean
+  for its **own sector peer group**.
 - **Configured:** `low_activity_zscore_threshold = -1.5`
+- **Peer-relative, not global.** Sectors differ in natural alert volume
+  by an order of magnitude. Pooling them inflates the standard deviation
+  until nothing sits far from a mean describing no real population, so
+  genuine blind spots are **masked**: a healthcare entity at 150 alerts
+  against healthcare peers averaging 900 scores −0.87 pooled with energy
+  entities, and −2.26 within its own sector.
+- **Guard:** a peer group too small for the threshold to be reachable is
+  not assessed at all. A sample z-score is bounded by group size at
+  `(n−1)/√n`, so a group of 3 tops out at 1.155 and can never satisfy
+  −1.5 however extreme the entity. The minimum group is derived from the
+  configured threshold (−1.5 → 4), so the two cannot drift apart. Without
+  this the group looked assessed and silently reported nothing, which a
+  supervisor reads as "no blind spots found".
+- **Evidence:** alert count, peer group and size, peer mean and median,
+  z-score, threshold and minimum group size.
 
 ---
 
@@ -229,12 +253,85 @@ case_priority   =  Σ queue_priority for findings on the same alert
 ```
 
 Severity boosts: `CRITICAL 2.0 · HIGH 1.5 · MEDIUM 1.0 · LOW 0.5`.
-Queue size: `review_queue.top_n = 25` **cases** — every finding in a
-top-ranked case is shown, so a 4-finding case shows all four.
 
 Findings sharing an alert are correlated into one case so a supervisor
-sees compounding problems together. On the reference dataset, 81
-prioritised findings correlate into 25 cases.
+sees compounding problems together. Every finding in a selected case is
+shown, so a 4-finding case shows all four. On the reference dataset, 84
+prioritised findings correlate into 27 cases.
+
+### Selection is two-level, so no CSE is starved
+
+Selection combines:
+
+| | Setting | What it selects |
+|---|---|---|
+| Global priority | `review_queue.top_n = 25` | the 25 highest-priority cases anywhere in the submission |
+| Per-CSE coverage | `review_queue.per_entity_cases = 1` | each entity's own worst case |
+
+A purely global top-N lets a few high-volume entities own every top
+case. Measured on a 30-entity submission before this existed: **21 of 30
+entities received no queue item at all**, including one ranked 3rd by
+risk score with 202 CRITICAL findings. A supervisor working the queue
+would never have looked at 70% of the entities they are responsible for.
+
+Ordering is unchanged — still `case_priority`, descending — and every
+selected case keeps the global `case_rank` it earned, so nothing is
+promoted above a case that outranks it. Each row carries a
+`selection_reason` of `global_priority` or `entity_coverage`.
+
+An entity with **no findings contributes no case** and is simply absent
+from the queue. That absence is the correct supervisory statement about
+it; coverage never invents a row to make a portfolio look uniformly
+examined. Set `per_entity_cases: 0` to restore a purely global queue.
+
+## Evidence completeness
+
+Separate from the risk score, and never folded into it.
+
+```
+Risk score              what problems were detected
+Evidence completeness   how much of the expected assessment could be
+                        performed from the submitted data at all
+```
+
+Most execution-gap rules read a record and ask whether it shows the
+right thing happened. **A record that was never written produces no
+finding.** An entity with poor record-keeping therefore accumulates
+fewer findings — and a *better* risk score — than one keeping good
+records over identical behaviour.
+
+Measured on the reference dataset: the entity seeded with poor
+record-keeping scored **50.6** against **56.4** for a "typical" entity
+whose seeded rates are worse on no dimension at all. Only 32 of its 202
+HIGH/CRITICAL alerts carried an escalation record, so 170 were invisible
+to `MISSED_ESCALATION`; 18% of its cases had investigation notes, so
+`REPETITIVE_INVESTIGATION` had almost nothing to compare. The
+negative-space rules that exist to counter this fire once per entity
+against rules firing once per alert — **0.56 points of compensation
+against 17.63 points of suppression**.
+
+Reweighting would have meant tuning the risk model until the symptom
+disappeared, and would have silently changed every entity's rank.
+SAT-SA publishes the denominator instead. Four coverages are measured
+per entity:
+
+| Coverage | Denominator | Rules it gates |
+|---|---|---|
+| Escalation records | HIGH/CRITICAL alerts | `MISSED_ESCALATION` |
+| Investigation notes | cases | `REPETITIVE_INVESTIGATION` |
+| Alert lifecycle events | alerts | `ACK_WITHOUT_INVESTIGATION`, `SLOW_TRIAGE`, `FAST_CLOSURE` |
+| Case linkage | alerts | `REPETITIVE_INVESTIGATION`, `REPEATED_ALERT_WITHOUT_REMEDIATION` |
+
+Below `evidence_completeness.min_coverage_fraction` (default `0.5`) a
+coverage is reported as materially limiting, and the caveat names the
+rules affected. A measure with nothing to count — an entity with no
+HIGH/CRITICAL alerts has no escalation records to be missing — reports
+`None` rather than 0%, which would invent a gap.
+
+**Completeness is not a risk score.** It changes no finding, severity,
+weight or rank, and appears in no score breakdown. A low figure is a
+reason to ask a question: it may equally reflect an incomplete export or
+a case-management system that stores those records elsewhere.
 
 ## Peer benchmarking
 
