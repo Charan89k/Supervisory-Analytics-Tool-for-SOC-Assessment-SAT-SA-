@@ -142,6 +142,47 @@ def main():
     ok(f"status bar: {window.status_phase.text().strip()!r} "
        f"{window.status_dataset.text()!r}")
 
+    print("\n[1c] Demonstration mode: one click, the real pipeline")
+    import time as _time
+    started_demo = _time.time()
+    window.start_demo()
+    assert pump(lambda: window.current_result is not None
+                and not window.assessment_busy), "demo run hung"
+    demo_seconds = _time.time() - started_demo
+    ok(f"one click to a loaded assessment in {demo_seconds:.1f}s")
+
+    assert "PASSED" in window.validation_status.text()
+    ok("validation was shown, not skipped")
+
+    assert window.demo_active is True
+    assert not window.demo_banner.isHidden()
+    assert "DEMONSTRATION" in window.demo_banner.text()
+    assert "DEMONSTRATION DATA" in window.dashboard_status.text()
+    assert "synthetic" in window.session.dataset_label.lower()
+    ok("demonstration data labelled in the status bar, dashboard and "
+       "dataset name")
+
+    fired = {f["finding_type"] for f in window.findings}
+    assert len(fired) == 14, sorted(fired)
+    ok(f"all {len(fired)} rules fired on the demonstration dataset")
+
+    assert window.risk_table.rowCount() == 9
+    assert window.case_table.rowCount() > 0
+    ok(f"{window.risk_table.rowCount()} entities ranked, "
+       f"{window.case_table.rowCount()} correlated cases")
+
+    window.show_page(5)
+    assert window.group_table.rowCount() >= 3
+    ok(f"{window.group_table.rowCount()} comparable peer groups")
+
+    # Selecting a real submission must leave demonstration mode, so the
+    # banner can never outlive the data it describes.
+    window.drop_zone.set_dataset(DATA)
+    assert pump(lambda: not window.validation_busy)
+    assert window.demo_active is False
+    assert window.demo_banner.isHidden()
+    ok("selecting another dataset clears the demonstration banner")
+
     print("\n[2] Unsupported input is refused with a reason")
     window.drop_zone.set_dataset(os.path.join(DATA, "alerts.csv"))
     assert window.dataset_path is None, "a bare CSV must not be accepted"

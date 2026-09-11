@@ -44,6 +44,11 @@ from application.services import (
     review_service,
     rule_reference,
 )
+from application.services.demo_service import (
+    DEMO_BANNER,
+    DEMO_LABEL,
+    DemoService,
+)
 from application.services.history_service import HistoryService
 from application.services.evidence_service import (
     EvidenceService,
@@ -148,6 +153,9 @@ class MainWindow(QMainWindow):
         # run rather than a fixed folder, so Reports always shows the
         # artifacts of the assessment on screen — including when a past
         # assessment has been loaded from history.
+        self.demo_service = DemoService()
+        self.demo_active = False
+
         self.history = HistoryService(
             Path(self.app_settings.history_directory)
             if self.app_settings.history_directory else None)
@@ -333,6 +341,11 @@ class MainWindow(QMainWindow):
         self.action_new.triggered.connect(lambda: self.show_page(1))
         assessment_menu.addAction(self.action_new)
 
+        self.action_demo = QAction("Run &Demonstration Assessment", self)
+        self.action_demo.setShortcut("Ctrl+D")
+        self.action_demo.triggered.connect(self.start_demo)
+        assessment_menu.addAction(self.action_demo)
+
         self.action_run = QAction("&Run Assessment", self)
         self.action_run.setShortcut("Ctrl+R")
         self.action_run.triggered.connect(self.start_assessment)
@@ -391,6 +404,10 @@ class MainWindow(QMainWindow):
         self.status_phase = QLabel("")
         self.status_dataset = QLabel("")
         self.status_ai = QLabel("")
+        self.demo_banner = QLabel("")
+        self.demo_banner.setObjectName("demo_banner")
+        self.demo_banner.setVisible(False)
+
         self.status_offline = QLabel("OFFLINE / AIR-GAPPED")
         self.status_offline.setObjectName("status_offline")
 
@@ -398,6 +415,7 @@ class MainWindow(QMainWindow):
             widget.setObjectName("status_item")
             bar.addWidget(widget)
 
+        bar.addPermanentWidget(self.demo_banner)
         bar.addPermanentWidget(self.status_ai)
         bar.addPermanentWidget(self.status_offline)
         self.status_ai.setObjectName("status_item")
@@ -633,6 +651,11 @@ class MainWindow(QMainWindow):
 
         self.dashboard_status = QLabel("No assessment loaded.")
         self.dashboard_status.setObjectName("status_label")
+        # Wraps: with the demonstration banner prefixed this line is long,
+        # and a clipped banner is worse than no banner.
+        self.dashboard_status.setWordWrap(True)
+        self.dashboard_status.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Minimum)
         layout.addWidget(self.dashboard_status)
 
         # ---- Executive overview -----------------------------------
@@ -872,6 +895,35 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(description)
 
+        # ---- Demonstration ----------------------------------------
+        # One click: prepare the built-in dataset, validate it, and run
+        # the real pipeline. No configuration during a demonstration.
+        demo_row = QHBoxLayout()
+
+        self.demo_button = QPushButton("Run Demonstration Assessment")
+        self.demo_button.setObjectName("demo_button")
+        self.demo_button.setCursor(Qt.PointingHandCursor)
+        self.demo_button.setMinimumHeight(40)
+        self.demo_button.clicked.connect(self.start_demo)
+        demo_row.addWidget(self.demo_button)
+
+        demo_hint = QLabel(
+            "Runs the full pipeline over a built-in synthetic submission "
+            "— the same ingestion, rules, evidence and reports a real "
+            "submission takes. Nothing is staged or precomputed."
+        )
+        demo_hint.setObjectName("caveat")
+        demo_hint.setWordWrap(True)
+        demo_row.addWidget(demo_hint, 1)
+
+        layout.addLayout(demo_row)
+
+        separator = QLabel("or assess a submission of your own")
+        separator.setObjectName("caveat")
+        separator.setAlignment(Qt.AlignCenter)
+        separator.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        layout.addWidget(separator)
+
         self.drop_zone = DropZone()
 
         self.drop_zone.path_selected.connect(
@@ -988,11 +1040,73 @@ class MainWindow(QMainWindow):
 
         return page
 
+    def start_demo(self):
+        """
+        Prepare the demonstration dataset and assess it.
+
+        Everything after this point is the ordinary path: the dataset is
+        selected exactly as a dropped folder would be, validated by the
+        same validator, and assessed by the same pipeline. Demonstration
+        mode changes where the data came from and nothing else.
+        """
+        if self.session.is_busy or self.assessment_busy:
+            self.notify("info", "Assessment Running",
+                         "Wait for the current assessment to finish.")
+            return
+
+        self.demo_button.setEnabled(False)
+        self.progress_label.setText("Preparing demonstration dataset…")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            dataset = self.demo_service.prepare(
+                progress=self.progress_label.setText)
+        except RuntimeError as exc:
+            self.notify("critical", "Demonstration Unavailable", str(exc))
+            self.progress_label.setText("Demonstration dataset unavailable.")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.demo_button.setEnabled(True)
+
+        self.demo_active = True
+        self.set_demo_banner(True)
+
+        self.assessment_log.clear()
+        self.assessment_log.append(
+            f"\u2139 {DEMO_BANNER}")
+        self.assessment_log.append(
+            f"  {dataset.entities} entities, "
+            f"{dataset.entities * dataset.alerts_per_entity:,} alerts, "
+            f"{'generated now' if dataset.generated else 'already present'}.")
+
+        # Hand off to the ordinary selection path, then run once it
+        # validates — so the demonstration shows validation happening
+        # rather than skipping it.
+        self._run_after_validation = True
+        self.drop_zone.set_dataset(str(dataset.path))
+
+    def set_demo_banner(self, visible: bool):
+        """
+        Demonstration data must be unmistakable on every page, so the
+        banner lives in the status bar rather than on one screen.
+        """
+        self.demo_banner.setVisible(visible)
+        self.demo_banner.setText("DEMONSTRATION DATA — SYNTHETIC" if visible
+                                  else "")
+
     def dataset_selected(self, path):
         self.selected_dataset = path
         self.dataset_path = path
 
-        self.session.set_dataset(path, Path(path).name)
+        # Selecting anything other than the demonstration dataset leaves
+        # demonstration mode, so the banner can never outlive the data
+        # it describes.
+        is_demo = Path(path) == self.demo_service.dataset_path
+        self.demo_active = is_demo
+        self.set_demo_banner(is_demo)
+
+        label = DEMO_LABEL if is_demo else Path(path).name
+        self.session.set_dataset(path, label)
         self.refresh_status_bar()
 
         self.progress_label.setText(
@@ -1090,6 +1204,13 @@ class MainWindow(QMainWindow):
             )
 
         self.session.transition(Phase.READY)
+
+        # A demonstration run continues straight into the assessment
+        # once validation has passed, so a single click covers the whole
+        # workflow. Validation is shown, not skipped.
+        if getattr(self, "_run_after_validation", False):
+            self._run_after_validation = False
+            QTimer.singleShot(0, self.start_assessment)
 
     def validation_error(self, message):
         self.validation_busy = False
@@ -1327,6 +1448,9 @@ class MainWindow(QMainWindow):
         self.app_settings = settings
         self.settings_service.save_app_settings(settings)
 
+        self.demo_service = DemoService()
+        self.demo_active = False
+
         self.history = HistoryService(
             Path(settings.history_directory)
             if settings.history_directory else None)
@@ -1499,6 +1623,13 @@ class MainWindow(QMainWindow):
         # supervisor can correct the cause and run again without
         # re-selecting the submission.
         self.session.transition(Phase.READY)
+
+        # A demonstration run continues straight into the assessment
+        # once validation has passed, so a single click covers the whole
+        # workflow. Validation is shown, not skipped.
+        if getattr(self, "_run_after_validation", False):
+            self._run_after_validation = False
+            QTimer.singleShot(0, self.start_assessment)
 
         self.progress_label.setText(
             "Assessment failed."
@@ -2201,7 +2332,11 @@ class MainWindow(QMainWindow):
                 if column == 3 and case.finding_count > 1:
                     item.setForeground(QColor("#e8c07d"))
                 self.case_table.setItem(row, column, item)
-            self.case_table.item(row, 0).setData(Qt.UserRole, row)
+            # Stable identity, not a row index. A positional index goes
+            # stale the moment the list is rebuilt under a live
+            # selection, and the detail panel then renders one case
+            # while the table reports another.
+            self.case_table.item(row, 0).setData(Qt.UserRole, case.case_rank)
 
         self.case_table.resizeColumnsToContents()
 
@@ -2220,10 +2355,11 @@ class MainWindow(QMainWindow):
         if not items:
             return None
         item = self.case_table.item(items[0].row(), 0)
-        index = item.data(Qt.UserRole) if item else None
-        if index is None or index >= len(self.review_cases):
+        case_rank = item.data(Qt.UserRole) if item else None
+        if case_rank is None:
             return None
-        return self.review_cases[index]
+        return next((case for case in self.review_cases
+                     if case.case_rank == case_rank), None)
 
     def review_case_selected(self):
         case = self.selected_review_case()
@@ -2256,6 +2392,11 @@ class MainWindow(QMainWindow):
 
         self.review_table.resizeColumnsToContents()
         self.review_table.selectRow(0)
+        # Called explicitly rather than relying on itemSelectionChanged:
+        # that signal does not fire when row 0 was already selected, and
+        # the detail panel would then keep showing the PREVIOUS case's
+        # finding while the table reports the new one.
+        self.review_selected()
 
     def review_selected(self):
         rows = self.review_table.selectedItems()
@@ -2400,7 +2541,8 @@ class MainWindow(QMainWindow):
                         and summary.run_id == self.current_run.run_id):
                     item.setForeground(QColor("#7fd1a0"))
                 self.history_table.setItem(row, column, item)
-            self.history_table.item(row, 0).setData(Qt.UserRole, row)
+            self.history_table.item(row, 0).setData(
+                Qt.UserRole, summary.run_id)
 
         self.history_table.resizeColumnsToContents()
 
@@ -2421,10 +2563,11 @@ class MainWindow(QMainWindow):
         if not items:
             return None
         item = self.history_table.item(items[0].row(), 0)
-        index = item.data(Qt.UserRole) if item else None
-        if index is None or index >= len(self.history_runs):
+        run_id = item.data(Qt.UserRole) if item else None
+        if run_id is None:
             return None
-        return self.history_runs[index]
+        return next((run for run in self.history_runs
+                     if run.summary.run_id == run_id), None)
 
     def history_selection_changed(self):
         run = self.selected_run()
@@ -2443,6 +2586,10 @@ class MainWindow(QMainWindow):
         run = self.selected_run()
         if run is None:
             return
+
+        # A stored demonstration run stays labelled as one when reloaded.
+        self.demo_active = run.summary.dataset_label == DEMO_LABEL
+        self.set_demo_banner(self.demo_active)
 
         results = self.history.load_results(run)
         if results is None:
@@ -2710,23 +2857,28 @@ class MainWindow(QMainWindow):
                 elif not comparable and column in (3, 4, 5):
                     item.setForeground(QColor("#7d8899"))
                 self.position_table.setItem(row, column, item)
-            self.position_table.item(row, 0).setData(Qt.UserRole, row)
+            self.position_table.item(row, 0).setData(
+                Qt.UserRole, position.soc_id)
 
         self.position_table.resizeColumnsToContents()
 
         if self.benchmark_positions and not self.position_table.selectedItems():
             self.position_table.selectRow(0)
+        # Same reason as the review queue: a surviving selection means no
+        # signal, and the comparison panel would describe the entity from
+        # the previous assessment.
+        self.benchmark_entity_selected()
 
     def benchmark_entity_selected(self):
         items = self.position_table.selectedItems()
         if not items:
             return
         item = self.position_table.item(items[0].row(), 0)
-        index = item.data(Qt.UserRole) if item else None
-        if index is None or index >= len(self.benchmark_positions):
+        soc_id = item.data(Qt.UserRole) if item else None
+        position = next((p for p in self.benchmark_positions
+                         if p.soc_id == soc_id), None)
+        if position is None:
             return
-
-        position = self.benchmark_positions[index]
         self.comparison_title.setText(
             f"{position.soc_id} — {position.organization}")
         self.comparison_position.setText(position.position_label)
@@ -2973,12 +3125,22 @@ class MainWindow(QMainWindow):
         self.kpi_explained.value_label.setText(
             f"{summary.explained} / {summary.total_findings:,}")
 
-        self.dashboard_status.setText(
+        assessed = (
             f"{summary.entities} entities assessed over "
             f"{summary.total_alerts:,} alerts. "
             f"{summary.total_findings:,} findings, "
             f"{summary.review_queue} prioritised for review."
         )
+        # Stated on the dashboard as well as the status bar: this is the
+        # page a demonstration spends most of its time on, and the one
+        # most likely to be photographed.
+        if self.demo_active:
+            assessed = f"{DEMO_BANNER}  |  {assessed}"
+        self.dashboard_status.setText(assessed)
+        self.dashboard_status.setProperty(
+            "demo", "true" if self.demo_active else "false")
+        self.dashboard_status.style().unpolish(self.dashboard_status)
+        self.dashboard_status.style().polish(self.dashboard_status)
 
         # ---- WHO ---------------------------------------------------
         self.dashboard_rows = dashboard_service.entity_rankings(results)
@@ -3393,6 +3555,34 @@ class MainWindow(QMainWindow):
                 color: #8c9ab0;
                 font-size: 11px;
                 padding: 2px 6px;
+            }
+            QLabel#demo_banner {
+                background-color: #6b3a12;
+                color: #ffd9a8;
+                font-size: 10px;
+                font-weight: 700;
+                padding: 2px 10px;
+                border-radius: 3px;
+            }
+            QLabel#status_label[demo="true"] {
+                background-color: #2a1d0e;
+                color: #e8c07d;
+                border-left: 3px solid #a8792c;
+                padding: 8px 10px;
+                border-radius: 4px;
+            }
+            QPushButton#demo_button {
+                background-color: #2e5c8a;
+                color: #eaf2ff;
+                border: 1px solid #3d74ad;
+                border-radius: 5px;
+                font-weight: 700;
+                padding: 8px 18px;
+            }
+            QPushButton#demo_button:hover { background-color: #36699c; }
+            QPushButton#demo_button:disabled {
+                background-color: #24303f;
+                color: #6b7686;
             }
             QLabel#status_offline {
                 color: #7fd1a0;

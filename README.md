@@ -105,6 +105,18 @@ Inside it: **New Assessment** → drop or browse to `data/synthetic` →
 validation runs automatically → **RUN ASSESSMENT** (~2 seconds) →
 Dashboard, Findings, Review Queue, Benchmarking and Reports unlock.
 
+### Demonstration mode
+
+**New Assessment → Run Demonstration Assessment** (or `Ctrl+D`) builds a
+synthetic submission and assesses it in about four seconds — nine
+entities, all fourteen rules firing, three comparable peer groups.
+
+It runs the **real pipeline**: the same ingestion, validation,
+normalisation, detection, evidence, scoring and reporting a real
+submission takes. Nothing is staged or precomputed. The only thing it
+changes is where the dataset came from, and the data is labelled as
+synthetic in the status bar, on the dashboard and in the dataset name.
+
 ### System dependencies
 
 Linux needs Qt's platform libraries, which most desktops already have.
@@ -363,10 +375,9 @@ exact counts. Run `pytest` fresh; fixtures build their own assessment.
 rules · evidence drill-down · risk scoring · peer benchmarking ·
 capability mapping · trend analysis · review queue · assessment history ·
 settings · reporting · local AI layer · validation framework ·
-offline hardening · documentation
+offline hardening · documentation · demonstration mode
 
-**Remaining** — demo mode · packaging (Windows `.exe`, Linux AppImage) ·
-final QA
+**Remaining** — packaging (Windows `.exe`, Linux AppImage) · final QA
 
 ## Documentation
 

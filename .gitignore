@@ -24,3 +24,4 @@ assessments/
 *.bin
 *.safetensors
 models/
+data/demo/
