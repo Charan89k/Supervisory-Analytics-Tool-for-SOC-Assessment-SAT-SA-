@@ -64,10 +64,29 @@ negative_space:
   # Telemetry coverage below this percentage is a coverage gap
   min_expected_coverage_pct: 70
   # Entity-level alert volume more than this many std-devs below the
-  # peer mean (for its sector) is flagged as unexpectedly low activity
+  # mean FOR ITS PEER GROUP is flagged as unexpectedly low activity.
+  #
+  # The baseline is the peer group defined by benchmarking.peer_group_by
+  # above — not the whole submission. Sectors differ in natural alert
+  # volume by an order of magnitude, and pooling them inflates the
+  # standard deviation until genuine blind spots are masked: a
+  # healthcare entity at 150 alerts against healthcare peers averaging
+  # ~910 scores -0.93 pooled with energy entities, but -1.50 within its
+  # own sector.
+  #
+  # A peer group smaller than 3 entities is not assessed at all: a
+  # standard deviation over two entities describes nothing.
   low_activity_zscore_threshold: -1.5
-  # Category present for >= this fraction of peers but absent for an
-  # entity is flagged as a missing alert category
+  # Category present for >= this fraction of an entity's PEER GROUP but
+  # absent for that entity is flagged as a missing alert category.
+  #
+  # Peer-relative for the same reason as the volume test above.
+  # "Expected" only means something against comparable entities: an
+  # energy CSE not reporting a category every healthcare CSE reports
+  # says nothing. Pooling sectors both invents gaps and hides them.
+  #
+  # A peer group below 3 entities is not assessed: "present for a
+  # strong majority of peers" is not a claim two entities can support.
   missing_category_peer_presence_fraction: 0.6
   # MISSING_ESCALATION_RECORDS — fraction of an entity's HIGH/CRITICAL
   # alerts that must carry SOME escalation record (initiated or not)
@@ -90,6 +109,27 @@ negative_space:
   # Fraction of a SOC's cases with blank investigation_notes above which
   # MISSING_INVESTIGATIONS fires
   missing_investigation_empty_fraction: 0.5
+
+evidence_completeness:
+  # How much of a submission the checks could actually run against,
+  # reported ALONGSIDE the risk score and never folded into it.
+  #
+  # Most execution-gap rules read a record and ask whether it shows the
+  # right thing happened. Where the record was never written the rule
+  # cannot fire, so an entity keeping poor records accumulates fewer
+  # findings than one keeping good records over identical behaviour —
+  # and therefore scores better. Measured on the reference dataset: an
+  # entity seeded with poor record-keeping scored 50.6 against 56.4 for
+  # a "typical" entity whose seeded rates are worse on no dimension at
+  # all.
+  #
+  # This does not reweight anything. It publishes the denominator, so a
+  # low score can be read correctly.
+  #
+  # Coverage below this fraction is reported as materially limiting what
+  # could be examined. NOT a finding: absent records may reflect an
+  # incomplete export or a system that stores them elsewhere.
+  min_coverage_fraction: 0.5
 
 benchmarking:
   # Peer group key: "sector" groups entities by soc sector; "all" uses
@@ -131,8 +171,23 @@ scoring:
   normalize_per: 100
 
 review_queue:
-  # How many findings to surface in the supervisory review queue
+  # How many CASES to surface by global priority. Every finding in a
+  # selected case is shown, so the row count exceeds this number.
   top_n: 25
+
+  # Cases each entity contributes regardless of global rank, so a few
+  # high-volume CSEs cannot starve the rest of the portfolio.
+  #
+  # Measured on a 30-entity submission before this existed: 21 of 30
+  # entities received no queue item at all, including one ranked 3rd by
+  # risk score with 202 CRITICAL findings. A supervisor responsible for
+  # 30 CSEs would never have looked at 21 of them.
+  #
+  # 1 means "the worst case at every CSE". Set to 0 to restore a purely
+  # global queue. An entity with no findings contributes nothing either
+  # way — a clean entity is absent from the queue, and that absence is
+  # the correct supervisory statement about it.
+  per_entity_cases: 1
   # Extra weight given to findings from an entity's highest-severity
   # alerts when ranking the queue (on top of the base scoring weight)
   severity_boost:

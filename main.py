@@ -31,6 +31,7 @@ from analytics.metrics.case_metrics import (
 )
 from analytics.metrics.escalation_metrics import escalation_compliance_by_soc
 from analytics.detection.execution_gaps import run_all_execution_gap_detectors
+from analytics.completeness import assess_completeness
 from analytics.detection.negative_space import run_all_negative_space_detectors
 from analytics.scoring.benchmark import add_peer_group, percentile_rank_by_peer_group
 from analytics.scoring.score import build_finding_counts, compute_entity_risk_scores, score_breakdown_for_entity
@@ -349,6 +350,17 @@ def run_pipeline(
     print()
 
     # ---- Assemble entity-level assessments ----
+    # How much of each submission the checks could actually run against.
+    # Reported ALONGSIDE the risk score and never folded into it: the
+    # score counts what the records allow it to count, and a supervisor
+    # has to be able to tell "little went wrong" from "little could be
+    # examined". See analytics/completeness.py.
+    completeness = assess_completeness(
+        alerts_enriched, data.get("cases"), data.get("alert_events"),
+        threshold=cfg.get("evidence_completeness", {}).get(
+            "min_coverage_fraction", 0.5),
+    )
+
     entity_assessments = []
     for soc_id in risk_scores["soc_id"]:
         breakdown = score_breakdown_for_entity(risk_scores, soc_id, cfg)
@@ -369,6 +381,9 @@ def run_pipeline(
             "execution_gap_count": len(entity_exec_findings),
             "negative_space_count": len(entity_neg_findings),
             "score_breakdown": breakdown.get("components", []),
+            "evidence_completeness": (
+                completeness[soc_id].to_dict() if soc_id in completeness
+                else None),
             "execution_gap_findings": df_records(entity_exec_findings),
             "negative_space_findings": df_records(entity_neg_findings),
             "metrics": {

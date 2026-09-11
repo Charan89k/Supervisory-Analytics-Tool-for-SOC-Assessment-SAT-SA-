@@ -325,6 +325,37 @@ def write_pdf_report(out_path: str, assessment_results: dict,
     else:
         story.append(Paragraph("No entities assessed.", body_style))
 
+    # ---- Evidence completeness ----
+    # Printed immediately after the ranking and before anything else is
+    # read into it. The risk score counts what the records allow it to
+    # count, so an entity whose records are largely absent will rank
+    # low for a reason that has nothing to do with how well it was run.
+    # A report that showed the ranking without this could be read
+    # exactly backwards.
+    limited = [
+        entity for entity in entities
+        if (entity.get("evidence_completeness") or {}).get("limited")
+    ]
+    if limited:
+        story.append(Spacer(1, 0.14 * inch))
+        story.append(Paragraph("Evidence Completeness", h2_style))
+        story.append(Paragraph(
+            "These entities did not submit enough of the records the "
+            "checks depend on for those checks to run fully. Their "
+            "finding counts and risk scores are a floor, not a "
+            "measurement of how much went wrong. This is not itself a "
+            "finding: absent records may reflect an incomplete export "
+            "or a system that stores them elsewhere.",
+            caption_style))
+        for entity in limited:
+            completeness = entity["evidence_completeness"]
+            story.append(Paragraph(
+                f"<b>{entity.get('soc_id')}</b> — "
+                f"{completeness['overall_coverage'] * 100:.0f}% of the "
+                f"records these checks read were present. Limited: "
+                f"{', '.join(completeness['suppressed_rules'])}.",
+                body_style))
+
     # ---- Peer benchmarking ----
     # Omitted entirely where no peer group is large enough to compare
     # against. An empty section would imply the tool looked and found

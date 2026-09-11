@@ -28,13 +28,28 @@ import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["SATSA_NARRATION_BACKEND"] = "mock"
+
+#: Every finding type the engine can emit.
+ALL_RULE_TYPES = {
+    "MISSED_ESCALATION", "SLOW_TRIAGE", "FAST_CLOSURE", "MISSING_EVIDENCE",
+    "REOPENED_CASE", "REPETITIVE_INVESTIGATION", "ANALYST_OVERLOAD",
+    "ACK_WITHOUT_INVESTIGATION", "REPEATED_ALERT_WITHOUT_REMEDIATION",
+    "TELEMETRY_GAP", "MISSING_ALERT_CATEGORY", "LOW_ACTIVITY_OUTLIER",
+    "MISSING_ESCALATION_RECORDS", "MISSING_INVESTIGATIONS",
+}
 # Never read or write the developer's real settings file.
 os.environ["SATSA_CONFIG_DIR"] = tempfile.mkdtemp(prefix="satsa-smoke-config-")
 # Assessment history in a throwaway directory, so a smoke run never
 # writes into the developer's real history.
 os.environ["SATSA_ASSESSMENTS_DIR"] = tempfile.mkdtemp(prefix="satsa-smoke-hist-")
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
+
+# After the path insert, so the package resolves. The demonstration
+# entity count is read from the service rather than repeated here: a
+# literal would silently disagree the next time the dataset changes.
+from application.services.demo_service import DEMO_ENTITIES  # noqa: E402
 
 import pandas as pd  # noqa: E402
 from PySide6.QtCore import QEventLoop, QTimer  # noqa: E402
@@ -163,10 +178,37 @@ def main():
        "dataset name")
 
     fired = {f["finding_type"] for f in window.findings}
-    assert len(fired) == 14, sorted(fired)
-    ok(f"all {len(fired)} rules fired on the demonstration dataset")
 
-    assert window.risk_table.rowCount() == 9
+    # LOW_ACTIVITY_OUTLIER compares an entity against its own peer
+    # group, and a sample z-score is bounded by group size: a group of
+    # 3 tops out at 1.155 and can never reach the configured -1.5. The
+    # demonstration dataset has 3-entity sectors, so the rule is
+    # structurally unfireable there — computed here rather than
+    # hardcoded, so the check re-arms itself if the dataset grows.
+    import collections as _collections
+
+    import yaml as _yaml
+
+    from analytics.detection.negative_space import minimum_group_for_zscore
+
+    _cfg = _yaml.safe_load(open(os.path.join(PROJECT_ROOT, "config",
+                                              "assessment_rules.yaml")))
+    _needed = minimum_group_for_zscore(
+        _cfg["negative_space"]["low_activity_zscore_threshold"])
+    _sizes = _collections.Counter(e.get("peer_group")
+                                   for e in window.current_result["entities"])
+    _unfireable = ({"LOW_ACTIVITY_OUTLIER"}
+                   if _sizes and max(_sizes.values()) < _needed else set())
+
+    expected = 14 - len(_unfireable)
+    assert fired == ALL_RULE_TYPES - _unfireable, sorted(
+        (ALL_RULE_TYPES - _unfireable) ^ fired)
+    ok(f"{len(fired)} of 14 rules fired on the demonstration dataset"
+       + (f"; {', '.join(sorted(_unfireable))} needs a peer group of "
+          f"{_needed} and the demo has {max(_sizes.values())}"
+          if _unfireable else " (all of them)"))
+
+    assert window.risk_table.rowCount() == DEMO_ENTITIES
     assert window.case_table.rowCount() > 0
     ok(f"{window.risk_table.rowCount()} entities ranked, "
        f"{window.case_table.rowCount()} correlated cases")
@@ -227,7 +269,7 @@ def main():
     ok(f"{len(window.findings)} findings, "
        f"{len(window.review_queue)} review-queue items")
     assert window.risk_table.rowCount() == 5
-    assert window.risk_table.columnCount() == 9
+    assert window.risk_table.columnCount() == 10
     ok(f"dashboard ranks {window.risk_table.rowCount()} entities "
        f"across {window.risk_table.columnCount()} columns")
 

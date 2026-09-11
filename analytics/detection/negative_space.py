@@ -9,8 +9,43 @@ only an absence, so every finding here must explain what was expected
 and why.
 """
 
+import math
+
 import pandas as pd
+
+from analytics.benchmarking import MIN_PEERS
 from analytics.metrics.telemetry_metrics import expected_source_gaps
+from analytics.scoring.benchmark import add_peer_group
+
+#: Peer group for entities whose submission carries no sector. They are
+#: compared only with each other, never folded into a named sector.
+UNKNOWN_PEER_GROUP = "UNSPECIFIED"
+
+
+def minimum_group_for_zscore(threshold: float) -> int:
+    """
+    The smallest peer group in which a z-score threshold is reachable
+    at all.
+
+    A sample z-score is bounded by the group size. With n entities the
+    most extreme value any one of them can reach is (n-1)/sqrt(n), so a
+    group of 3 tops out at 1.155 and can NEVER satisfy a -1.5
+    threshold — however under-instrumented an entity actually is.
+
+    Without this, such a group looks assessed and silently reports
+    nothing, which is the worst outcome: a supervisor reads "no low
+    activity outliers" as evidence of health when the test could not
+    have produced a finding in the first place. Deriving the minimum
+    from the configured threshold keeps the two honest about each
+    other, and changing the threshold changes the minimum with it.
+    """
+    limit = abs(float(threshold))
+    size = max(2, MIN_PEERS)
+    while (size - 1) / math.sqrt(size) < limit:
+        size += 1
+        if size > 1000:            # a threshold no real setting reaches
+            break
+    return size
 
 
 def detect_telemetry_gaps(telemetry: pd.DataFrame, cfg: dict) -> pd.DataFrame:
@@ -39,82 +74,186 @@ def detect_telemetry_gaps(telemetry: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return gaps[["soc_id", "source_name", "finding_type", "rule_id", "rationale", "evidence"]]
 
 
-def detect_missing_categories(alert_categories_by_soc: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+def detect_missing_categories(alert_categories_by_soc: pd.DataFrame, cfg: dict,
+                                peer_groups: dict = None) -> pd.DataFrame:
     """
     alert_categories_by_soc: output of alert_metrics.category_coverage_by_soc
     (soc_id -> set of categories observed).
 
     Flags an entity as missing a category if that category is present
-    for a strong majority of peer entities but absent for this one.
+    for a strong majority of its PEER GROUP but absent for this one.
+
+    The comparison is peer-relative for the same reason
+    LOW_ACTIVITY_OUTLIER is. "Expected" only means anything against
+    comparable entities: an energy CSE not reporting a category that
+    every healthcare CSE reports says nothing, because the two run
+    different technology against different threats. Pooling sectors
+    both invents gaps (a category normal for one sector, absent in
+    another) and hides them (a category universal within a sector gets
+    diluted below the threshold by sectors that do not use it).
+
+    A group below MIN_PEERS is not assessed. "Present for a strong
+    majority of peers" is not a claim two entities can support.
     """
     presence_fraction = cfg["negative_space"]["missing_category_peer_presence_fraction"]
 
-    all_categories = set()
-    for cats in alert_categories_by_soc["categories_observed"]:
-        all_categories |= cats
+    df = alert_categories_by_soc.copy()
+    if df.empty:
+        return pd.DataFrame()
 
-    n_socs = len(alert_categories_by_soc)
+    if peer_groups:
+        df["peer_group"] = (df["soc_id"].map(peer_groups)
+                            .fillna(UNKNOWN_PEER_GROUP)
+                            .replace("", UNKNOWN_PEER_GROUP))
+    else:
+        df["peer_group"] = UNKNOWN_PEER_GROUP
+
     findings = []
-    for category in all_categories:
-        present_mask = alert_categories_by_soc["categories_observed"].apply(lambda s: category in s)
-        peer_presence = present_mask.sum() / n_socs
-        if peer_presence < presence_fraction:
-            continue  # not common enough across peers to be "expected"
+    for group_name, group in df.groupby("peer_group", sort=True):
+        if len(group) < MIN_PEERS:
+            continue
 
-        for _, row in alert_categories_by_soc[~present_mask].iterrows():
-            findings.append({
-                "soc_id": row["soc_id"],
-                "category": category,
-                "finding_type": "MISSING_ALERT_CATEGORY",
-                "rule_id": "CATEGORY-PEER-COVERAGE-001",
-                "rationale": (
-                    f"'{category}' alerts appear for "
-                    f"{round(peer_presence * 100, 1)}% of peer entities but "
-                    f"were not observed for this entity during the assessment "
-                    f"period. Absence of a category may reflect a genuine "
-                    f"monitoring blind spot or simply a different technology "
-                    f"footprint — it is an indicator for review, not a defect "
-                    f"on its own."
-                ),
-                "evidence": {
-                    "missing_category": category,
-                    "peer_presence_fraction": round(peer_presence, 3),
-                    "peer_presence_threshold": presence_fraction,
-                    "peer_entity_count": int(n_socs),
-                    "peers_with_category": int(present_mask.sum()),
-                },
-            })
+        observed = set()
+        for categories in group["categories_observed"]:
+            observed |= set(categories)
+
+        peers = len(group)
+        for category in sorted(observed):
+            present_mask = group["categories_observed"].apply(
+                lambda seen: category in seen)
+            peer_presence = present_mask.sum() / peers
+            if peer_presence < presence_fraction:
+                continue  # not common enough among peers to be "expected"
+
+            where = ("its peer group" if group_name == UNKNOWN_PEER_GROUP
+                     else f"the {group_name} peer group")
+
+            for _, row in group[~present_mask].iterrows():
+                findings.append({
+                    "soc_id": row["soc_id"],
+                    "category": category,
+                    "finding_type": "MISSING_ALERT_CATEGORY",
+                    "rule_id": "CATEGORY-PEER-COVERAGE-001",
+                    "rationale": (
+                        f"'{category}' alerts appear for "
+                        f"{round(peer_presence * 100, 1)}% of entities in "
+                        f"{where} ({peers} entities) but were not observed "
+                        f"for this entity during the assessment period. "
+                        f"Absence of a category may reflect a genuine "
+                        f"monitoring blind spot or simply a different "
+                        f"technology footprint — it is an indicator for "
+                        f"review, not a defect on its own."
+                    ),
+                    "evidence": {
+                        "missing_category": category,
+                        "peer_group": group_name,
+                        "peer_presence_fraction": round(peer_presence, 3),
+                        "peer_presence_threshold": presence_fraction,
+                        "peer_entity_count": int(peers),
+                        "peers_with_category": int(present_mask.sum()),
+                        "minimum_peers_required": MIN_PEERS,
+                    },
+                })
     return pd.DataFrame(findings)
 
 
-def detect_low_activity_outliers(alert_volume_by_soc: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+def detect_low_activity_outliers(alert_volume_by_soc: pd.DataFrame, cfg: dict,
+                                   peer_groups: dict = None) -> pd.DataFrame:
     """
-    Flags entities whose total alert volume is a statistical low
-    outlier relative to peers — a proxy for monitoring blind spots
-    or under-instrumented environments.
+    Flags entities whose alert volume is a low outlier RELATIVE TO THEIR
+    PEER GROUP — a proxy for monitoring blind spots or
+    under-instrumented environments.
+
+    The baseline is the peer group, not the whole submission, and that
+    distinction decides whether the rule works at all. Sectors differ in
+    natural alert volume by an order of magnitude. Pooling them inflates
+    the standard deviation until nothing is more than 1.5 sigma from a
+    mean that describes no real population, so genuine blind spots are
+    MASKED rather than over-reported.
+
+    Measured on a mixed submission: a healthcare entity logging 150
+    alerts against healthcare peers averaging ~910 scored z = -0.93
+    pooled with energy entities (not flagged) versus z = -1.50 within
+    its own sector (flagged). The pooled comparison hid exactly the
+    entity the rule exists to find.
+
+    Peer groups come from the same `add_peer_group` the benchmarking
+    layer uses, so "peer" means one thing across the product and no
+    sector list is hard-coded anywhere.
+
+    A group too small for the configured threshold is not assessed at
+    all — see `minimum_group_for_zscore`. A z-score is bounded by group
+    size, so a 3-entity group cannot reach -1.5 no matter how extreme
+    the entity, and pretending otherwise would let a supervisor read
+    "nothing flagged" as evidence of health.
     """
     threshold = cfg["negative_space"]["low_activity_zscore_threshold"]
+
     df = alert_volume_by_soc.copy()
-
-    mean, std = df["alert_count"].mean(), df["alert_count"].std()
-    if not std or pd.isna(std):
+    if df.empty:
         return pd.DataFrame()
 
-    df["volume_zscore"] = (df["alert_count"] - mean) / std
-    flagged = df[df["volume_zscore"] <= threshold].copy()
+    if peer_groups:
+        df["peer_group"] = (df["soc_id"].map(peer_groups)
+                            .fillna(UNKNOWN_PEER_GROUP)
+                            .replace("", UNKNOWN_PEER_GROUP))
+    else:
+        # No sector metadata supplied: one group, and the rationale says
+        # so rather than implying a sector comparison that never happened.
+        df["peer_group"] = UNKNOWN_PEER_GROUP
 
-    if flagged.empty:
-        return pd.DataFrame()
+    minimum_group = minimum_group_for_zscore(threshold)
 
-    flagged["finding_type"] = "LOW_ACTIVITY_OUTLIER"
-    flagged["rule_id"] = "VOLUME-ZSCORE-001"
-    flagged["rationale"] = (
-        "Alert volume (" + flagged["alert_count"].astype(str) + ") is "
-        + flagged["volume_zscore"].round(2).astype(str)
-        + " standard deviations below the peer mean, suggesting a possible "
-        "monitoring gap rather than genuinely low risk."
-    )
-    return flagged[["soc_id", "alert_count", "finding_type", "rule_id", "rationale"]]
+    findings = []
+    for group_name, group in df.groupby("peer_group", sort=True):
+        if len(group) < minimum_group:
+            # Either too few peers for a standard deviation to describe
+            # anything, or too few for this threshold to be reachable.
+            # Saying nothing is the honest answer; see
+            # minimum_group_for_zscore.
+            continue
+
+        mean = group["alert_count"].mean()
+        std = group["alert_count"].std()
+        if not std or pd.isna(std):
+            continue  # every peer reported the same volume
+
+        median = group["alert_count"].median()
+
+        for _, row in group.iterrows():
+            zscore = (row["alert_count"] - mean) / std
+            if zscore > threshold:
+                continue
+
+            where = ("its peer group" if group_name == UNKNOWN_PEER_GROUP
+                     else f"the {group_name} peer group")
+            findings.append({
+                "soc_id": row["soc_id"],
+                "alert_count": int(row["alert_count"]),
+                "finding_type": "LOW_ACTIVITY_OUTLIER",
+                "rule_id": "VOLUME-ZSCORE-001",
+                "rationale": (
+                    f"Alert volume ({int(row['alert_count'])}) is "
+                    f"{round(zscore, 2)} standard deviations below the mean "
+                    f"for {where} ({len(group)} entities, mean "
+                    f"{round(mean, 1)}), which may indicate a monitoring "
+                    f"gap rather than genuinely low risk. Volume differs "
+                    f"legitimately with size and technology footprint; this "
+                    f"is an indicator for review, not a defect on its own."
+                ),
+                "evidence": {
+                    "alert_count": int(row["alert_count"]),
+                    "peer_group": group_name,
+                    "peer_group_size": int(len(group)),
+                    "peer_mean_alert_count": round(float(mean), 1),
+                    "peer_median_alert_count": round(float(median), 1),
+                    "volume_zscore": round(float(zscore), 2),
+                    "zscore_threshold": threshold,
+                    "minimum_peers_required": minimum_group,
+                },
+            })
+
+    return pd.DataFrame(findings)
 
 
 def detect_missing_escalation_records(alerts_enriched: pd.DataFrame, cfg: dict) -> pd.DataFrame:
@@ -223,13 +362,33 @@ def detect_missing_investigations(cases: pd.DataFrame, cfg: dict) -> pd.DataFram
     return pd.DataFrame(findings)
 
 
+def peer_group_map(data: dict, cfg: dict) -> dict:
+    """
+    soc_id -> peer group, using the same rule as peer benchmarking.
+
+    Returns an empty mapping when the submission carries no entity
+    table or no sector column, which callers read as "no peer
+    information available" rather than as "every entity is a peer".
+    """
+    socs = (data or {}).get("socs")
+    if socs is None or socs.empty or "soc_id" not in socs.columns:
+        return {}
+    if cfg.get("benchmarking", {}).get("peer_group_by") == "sector" \
+            and "sector" not in socs.columns:
+        return {}
+
+    grouped = add_peer_group(socs, cfg)
+    return dict(zip(grouped["soc_id"], grouped["peer_group"]))
+
+
 def run_all_negative_space_detectors(data: dict, alert_volume_by_soc: pd.DataFrame,
                                        alert_categories_by_soc: pd.DataFrame, cfg: dict,
                                        alerts_enriched: pd.DataFrame = None) -> pd.DataFrame:
+    peers = peer_group_map(data, cfg)
     frames = [
         detect_telemetry_gaps(data["telemetry"], cfg),
-        detect_missing_categories(alert_categories_by_soc, cfg),
-        detect_low_activity_outliers(alert_volume_by_soc, cfg),
+        detect_missing_categories(alert_categories_by_soc, cfg, peers),
+        detect_low_activity_outliers(alert_volume_by_soc, cfg, peers),
         detect_missing_investigations(data.get("cases", pd.DataFrame()), cfg),
     ]
     if alerts_enriched is not None:

@@ -90,6 +90,29 @@ class EntityRow:
     high: int
     peer_count: int = 1
 
+    #: Fraction of the records the checks depend on that this entity
+    #: actually submitted. None when nothing could be measured.
+    evidence_coverage: Optional[float] = None
+    #: Rules whose evidence base is materially incomplete here.
+    suppressed_rules: List[str] = field(default_factory=list)
+    #: The sentence a supervisor must read next to the score.
+    evidence_caveat: str = ""
+
+    @property
+    def evidence_limited(self) -> bool:
+        return bool(self.suppressed_rules)
+
+    @property
+    def evidence_label(self) -> str:
+        """
+        Coverage as a column value. A low figure is not a verdict — it
+        says how much of the submission could be examined at all, which
+        is what stops a low risk score being read as a clean one.
+        """
+        if self.evidence_coverage is None:
+            return "—"
+        return f"{self.evidence_coverage * 100:.0f}%"
+
     @property
     def comparable(self) -> bool:
         return self.peer_count >= MIN_PEERS_FOR_COMPARISON
@@ -215,6 +238,8 @@ def entity_rankings(results: dict) -> List[EntityRow]:
         score = float(entity.get("supervisory_risk_score", 0.0))
         median = medians.get(group, score)
 
+        completeness = entity.get("evidence_completeness") or {}
+
         critical = high = 0
         for finding in _iter_findings(entity):
             severity = _severity_of(finding)
@@ -238,6 +263,9 @@ def entity_rankings(results: dict) -> List[EntityRow]:
             critical=critical,
             high=high,
             peer_count=sizes.get(group, 1),
+            evidence_coverage=completeness.get("overall_coverage"),
+            suppressed_rules=list(completeness.get("suppressed_rules") or []),
+            evidence_caveat=str(completeness.get("caveat") or ""),
         ))
 
     return sorted(rows, key=lambda row: row.rank)

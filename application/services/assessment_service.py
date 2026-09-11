@@ -3,10 +3,14 @@ from typing import Callable, Optional
 
 from main import (
     detect_periods,
+    load_config,
     run_multi_period_pipeline,
     run_pipeline,
     validate_dataset_at,
 )
+
+from analytics.loader import load_soc_dataset
+from analytics.validation import format_report, load_ground_truth, validate
 
 from analytics.ingestion import (
     IngestionError,
@@ -14,6 +18,10 @@ from analytics.ingestion import (
     rejection_reason,
 )
 from analytics.validator import DatasetValidationError, ValidationReport
+
+#: Written beside the assessment it measures. Named in the Reports page's
+#: artifact list, so it appears there automatically once produced.
+VALIDATION_REPORT_FILE = "validation_report.txt"
 
 from application.services.ai_config import (
     AIConfig,
@@ -161,6 +169,14 @@ class AssessmentService:
                 "SAT-SA assessment pipeline returned no result."
             )
 
+        # Quality assurance only, and strictly after the fact. This runs
+        # on a finished assessment, reads it, and writes a report beside
+        # it. It cannot reach detection, scoring, evidence or the review
+        # queue — those are already computed and written by this point —
+        # and it is skipped entirely unless the dataset carries seeded
+        # labels, which a real submission never does.
+        self._write_validation_report(dataset, run, result, periods, progress)
+
         self.history.finalise(
             run, result, trend_report=trend_report,
             ai_backend=ai_config.backend if ai_config.enabled else "")
@@ -169,3 +185,45 @@ class AssessmentService:
         progress("Assessment completed.")
 
         return result, ai_config, trend_report, run
+
+    def _write_validation_report(self, dataset, run, result, periods,
+                                  progress) -> None:
+        """
+        Measure the finished assessment against the dataset's own seeded
+        labels, where it has any.
+
+        Only a generated dataset carries `ground_truth.json`. A real
+        submission does not, and its absence means "cannot be measured",
+        never "nothing was wrong" — so nothing is written and the UI
+        says why rather than showing an empty result.
+
+        The figures are synthetic throughout: the generator injects the
+        conditions the rules look for. `Validation.provenance` states
+        that on every surface, and it is not something this method may
+        soften.
+        """
+        # A multi-period run returns the newest period's assessment, so
+        # that is the period whose labels apply.
+        source = Path(periods[-1][1]) if len(periods) >= 2 else dataset
+
+        ground_truth = load_ground_truth(str(source))
+        if ground_truth is None:
+            return
+
+        try:
+            data = load_soc_dataset(str(source))
+            report = validate(result, ground_truth, dataset=str(source),
+                               alerts=data.get("alerts"),
+                               config=load_config(str(self.config_path)))
+            (run.path / VALIDATION_REPORT_FILE).write_text(
+                format_report(report) + "\n", encoding="utf-8")
+        except Exception as exc:
+            # Validation is an evaluation aid. A failure here must never
+            # cost the supervisor a completed assessment.
+            progress(f"Detection validation skipped: {exc}")
+            return
+
+        overall = report.overall()
+        progress(f"Detection validation: {overall.format_ratio(overall.precision)} "
+                  f"precision, {overall.format_ratio(overall.recall)} recall "
+                  f"(synthetic labels)")

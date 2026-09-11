@@ -46,7 +46,25 @@ SECTORS = ["FINANCE", "ENERGY", "HEALTHCARE", "GOVERNMENT", "TELECOM", "MANUFACT
 
 #: Smallest peer group worth comparing against. Matches the threshold
 #: the benchmarking layer applies before it will report a percentile.
-MIN_PEER_GROUP = 3
+#: Smallest peer group the generator will create.
+#:
+#: Not an arbitrary number. A sample z-score is bounded by group size at
+#: (n-1)/sqrt(n), so a group of 3 tops out at 1.155 and can NEVER reach
+#: the -1.5 threshold LOW_ACTIVITY_OUTLIER uses: the rule was
+#: structurally unfireable on generated data, and a demonstration that
+#: silently cannot exercise a rule is worse than one that omits it.
+#:
+#: 4 is the mathematical minimum but not a usable one. At n=4 the bound
+#: is exactly 1.5, so the rule fires only when every peer reports an
+#: identical volume — true of generated data and of nothing else.
+#: Measured: with 5% variation between peers, detection at n=4 falls
+#: from 100% to 0%. At n=5 the bound is 1.789 and detection holds at
+#: 100% through 30% variation.
+#:
+#: 5 is therefore the smallest group in which this rule works for a
+#: reason other than coincidence. See
+#: analytics.detection.negative_space.minimum_group_for_zscore.
+MIN_PEER_GROUP = 5
 
 
 def assign_sectors(n_socs: int, min_group: int = MIN_PEER_GROUP) -> list:
@@ -236,10 +254,26 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
 
     sectors_assigned = assign_sectors(n_socs)
 
-    profiles_assigned = []
-    for i in range(n_socs):
-        profile = PROFILE_ORDER[i] if i < len(PROFILE_ORDER) else random.choice(PROFILE_ORDER[:3])
-        profiles_assigned.append(profile)
+    # Profile assignment must NOT depend on the period.
+    #
+    # build_dataset reseeds the global RNG with `seed + period_index`,
+    # so drawing profiles from it re-drew them independently in every
+    # period: an entity could be "weak" in Q3, "clean" in Q4 and
+    # "typical" in Q1. Only the first five entities, whose profiles come
+    # from PROFILE_ORDER by index, held still. Every entity beyond them
+    # had no trajectory at all — a random walk by construction — which
+    # silently destroyed the ground truth that trend validation is
+    # measured against.
+    #
+    # A dedicated generator seeded with `seed` alone keeps the
+    # assignment reproducible and stable across the periods of one
+    # submission, which is what a trajectory means.
+    profile_rng = random.Random(seed)
+    profiles_assigned = [
+        PROFILE_ORDER[i] if i < len(PROFILE_ORDER)
+        else profile_rng.choice(PROFILE_ORDER[:3])
+        for i in range(n_socs)
+    ]
 
     # Where along the trajectory this period sits: 0.0 at the first
     # period, 1.0 at the last.

@@ -690,11 +690,19 @@ class MainWindow(QMainWindow):
             "Entity Risk Ranking", "Which entities need supervisory attention"))
 
         self.risk_table = QTableWidget()
-        self.risk_table.setColumnCount(9)
+        self.risk_table.setColumnCount(10)
         self.risk_table.setHorizontalHeaderLabels([
             "Rank", "Entity", "Organization", "Peer Group", "Risk Score",
-            "Percentile", "vs Peers", "Critical", "High",
+            "Percentile", "vs Peers", "Critical", "High", "Evidence",
         ])
+        # "Evidence" is how much of the submission the checks could run
+        # against. It is not part of the risk score and never changes
+        # it: it is the denominator, so a low score can be read
+        # correctly rather than as a clean result.
+        self.risk_table.setToolTip(
+            "Evidence: the share of records the checks depend on that "
+            "this entity actually submitted. A low figure means less "
+            "could be examined, not that less went wrong.")
         self.risk_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.risk_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.risk_table.setSelectionMode(QTableWidget.SingleSelection)
@@ -708,6 +716,16 @@ class MainWindow(QMainWindow):
         self.peer_note.setObjectName("caveat")
         self.peer_note.setWordWrap(True)
         layout.addWidget(self.peer_note)
+
+        # Shown only when the selected entity's records are too
+        # incomplete for the checks to have run properly. Silence here
+        # would be the dangerous case: a clean-looking score on a
+        # submission that barely contained anything to check.
+        self.evidence_note = QLabel("")
+        self.evidence_note.setObjectName("validation_caveat")
+        self.evidence_note.setWordWrap(True)
+        self.evidence_note.hide()
+        layout.addWidget(self.evidence_note)
 
         # ---- WHY + WHAT EVIDENCE -----------------------------------
         self.driver_title = self.section_title(
@@ -3069,12 +3087,53 @@ class MainWindow(QMainWindow):
             self.report_status
         )
 
-        self.report_list = QVBoxLayout()
-        layout.addLayout(
-            self.report_list
-        )
+        # Scrollable: a multi-period assessment lists every period's
+        # outputs, which is 28 rows for four periods. Before period
+        # discovery existed the page held four rows and always fitted;
+        # now a fixed page would simply clip the later periods, putting
+        # them out of reach again through a different mechanism.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
 
-        layout.addStretch()
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 12, 0)
+
+        # ---- Detection validation -----------------------------------
+        # Quality assurance about the RULES, shown here rather than left
+        # in a file the supervisor would have to find and open. It is
+        # never mixed into the assessment's own findings: it measures
+        # the detector, not the entity.
+        self.validation_panel = QWidget()
+        validation_layout = QVBoxLayout(self.validation_panel)
+        validation_layout.setContentsMargins(0, 0, 0, 6)
+        validation_layout.setSpacing(4)
+
+        validation_title = QLabel("Detection Validation")
+        validation_title.setObjectName("section_title")
+        validation_layout.addWidget(validation_title)
+
+        self.validation_caveat = QLabel("")
+        self.validation_caveat.setObjectName("validation_caveat")
+        self.validation_caveat.setWordWrap(True)
+        validation_layout.addWidget(self.validation_caveat)
+
+        self.validation_text = QTextEdit()
+        self.validation_text.setReadOnly(True)
+        self.validation_text.setObjectName("source_detail")
+        self.validation_text.setMinimumHeight(300)
+        validation_layout.addWidget(self.validation_text)
+
+        body_layout.addWidget(self.validation_panel)
+        self.validation_panel.hide()
+
+        self.report_list = QVBoxLayout()
+        body_layout.addLayout(self.report_list)
+        body_layout.addStretch()
+
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
 
         return page
 
@@ -3127,8 +3186,81 @@ class MainWindow(QMainWindow):
                 "History, to see its reports.")
             return
 
-        present = {entry.name for entry in directory.iterdir()
-                   if entry.is_file()}
+        # A multi-period assessment writes per-period outputs into
+        # periods/<name>/ and only the cross-period artifacts at the
+        # root. Scanning the root alone hid four of eight artifacts —
+        # including every CSV export — from anyone who assessed more
+        # than one period, leaving them to browse internal directories
+        # by hand to find outputs the tool had already produced.
+        periods = (run.period_directories() if run is not None else [])
+
+        if periods:
+            self._add_section_header(
+                "Assessment-level",
+                "Covering all periods together.")
+
+        listed = self._list_report_directory(directory)
+
+        for label, period_path in periods:
+            self._add_section_header(
+                f"Period — {label}",
+                "This period assessed on its own.")
+            listed += self._list_report_directory(period_path)
+
+        scope = (f" across {len(periods)} period(s)" if periods else "")
+        self.report_status.setText(
+            f"{listed} artifact(s){scope} from assessment {run.run_id}, "
+            f"stored in {directory}.")
+
+        self.refresh_validation_panel(directory)
+
+    def refresh_validation_panel(self, directory):
+        """
+        Show how the DETECTION RULES performed against a labelled
+        dataset — never how the assessed entity performed.
+
+        Present only for a generated dataset carrying seeded labels. A
+        real submission has none, and the panel stays hidden rather than
+        showing an empty or reassuring result: absence of labels means
+        the rules cannot be measured on this data, not that they were
+        measured and found correct.
+        """
+        if not hasattr(self, "validation_panel"):
+            return
+
+        report = directory / "validation_report.txt"
+        if not report.is_file():
+            self.validation_panel.hide()
+            return
+
+        try:
+            text = report.read_text(encoding="utf-8")
+        except OSError:
+            self.validation_panel.hide()
+            return
+
+        self.validation_caveat.setText(
+            "Measures SAT-SA's own detection rules against conditions a "
+            "dataset generator deliberately injected — NOT against expert "
+            "manual review, and NOT an assessment of any entity. The "
+            "generator injects the conditions the rules look for, so "
+            "agreement between them is partly circular: these figures "
+            "show the rules behave as specified, not that the "
+            "specification matches what an examiner would find. Nothing "
+            "here influences any finding, severity, evidence or risk "
+            "score."
+        )
+        self.validation_text.setPlainText(text)
+        self.validation_panel.show()
+
+    def _list_report_directory(self, directory) -> int:
+        """Render every artifact in one directory. Returns how many."""
+        try:
+            present = {entry.name for entry in directory.iterdir()
+                       if entry.is_file()}
+        except OSError:
+            return 0
+
         described = {name for name, _, _ in self.REPORT_ARTIFACTS}
 
         listed = 0
@@ -3146,9 +3278,24 @@ class MainWindow(QMainWindow):
                 "Produced by this assessment.")
             listed += 1
 
-        self.report_status.setText(
-            f"{listed} artifact(s) from assessment {run.run_id}, stored in "
-            f"{directory}.")
+        return listed
+
+    def _add_section_header(self, title, subtitle):
+        header = QWidget()
+        layout = QVBoxLayout(header)
+        layout.setContentsMargins(0, 10, 0, 2)
+        layout.setSpacing(1)
+
+        name = QLabel(title)
+        name.setObjectName("section_title")
+        layout.addWidget(name)
+
+        note = QLabel(subtitle)
+        note.setObjectName("caveat")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        self.report_list.addWidget(header)
 
     def _add_report_row(self, path, title, description):
         row = QFrame()
@@ -3269,6 +3416,7 @@ class MainWindow(QMainWindow):
                 row.deviation_label,
                 f"{row.critical:,}",
                 f"{row.high:,}",
+                row.evidence_label,
             ]
             for column, text in enumerate(cells):
                 item = QTableWidgetItem(text)
@@ -3278,6 +3426,11 @@ class MainWindow(QMainWindow):
                     item.setForeground(QColor(severity_color("HIGH")))
                 elif column == 6 and not row.comparable:
                     item.setForeground(QColor("#7d8899"))
+                elif column == 9 and row.evidence_limited:
+                    # Amber, not red: incomplete records are a reason to
+                    # ask a question, not a finding against the entity.
+                    item.setForeground(QColor("#f0b849"))
+                    item.setToolTip(row.evidence_caveat)
                 self.risk_table.setItem(index, column, item)
 
             self.risk_table.item(index, 0).setData(Qt.UserRole, row.soc_id)
@@ -3394,6 +3547,14 @@ class MainWindow(QMainWindow):
 
         soc_id = self.selected_dashboard_entity()
         results = self.current_result
+
+        selected = next((row for row in getattr(self, "dashboard_rows", [])
+                          if row.soc_id == soc_id), None)
+        if selected is not None and selected.evidence_limited:
+            self.evidence_note.setText(selected.evidence_caveat)
+            self.evidence_note.show()
+        else:
+            self.evidence_note.hide()
 
         # Six, not eight: the seventh and eighth contributors are
         # rounding on every entity in the sample, and fewer rows leaves
@@ -3652,6 +3813,15 @@ class MainWindow(QMainWindow):
                 font-size: 11px;
                 color: #cfc6b4;
             }
+            QLabel#validation_caveat {
+                color: #f0b849;
+                background: #241d0e;
+                border: 1px solid #4a3a16;
+                border-radius: 6px;
+                padding: 9px 11px;
+                font-size: 11px;
+            }
+
             QLabel#empty_state {
                 color: #7d8899;
                 font-size: 13px;

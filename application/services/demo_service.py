@@ -27,8 +27,19 @@ trend-consistency check needs more than one step to mean anything, so a
 two-period run reports a direction for every entity whether or not one
 exists.
 
-Nine entities is the smallest number giving three sector peer groups of
-three, which is the minimum for benchmarking to say anything at all.
+Fifteen entities is the smallest number giving three sector peer groups
+of five, and the sector-relative rules need five.
+
+A sample z-score is bounded at (n-1)/sqrt(n). At three peers the bound
+is 1.155, so LOW_ACTIVITY_OUTLIER's -1.5 threshold is unreachable and
+the rule cannot fire at all. At four the bound is exactly 1.5, so it
+fires only when every peer reports an identical volume — which is true
+of generated data and of nothing else: 5% variation between peers drops
+detection from 100% to 0%. At five the bound is 1.789 and detection
+survives 30% variation intact.
+
+A demonstration that silently cannot exercise a rule, or exercises it
+only by coincidence, is worse than one that omits it.
 
 Trend analysis is therefore NOT part of the demonstration dataset. It is
 exercised by generating a multi-period submission separately, which the
@@ -47,7 +58,7 @@ from typing import Callable, Optional
 #: Fixed so a demonstration is reproducible: the same entities, the same
 #: findings, the same ranking, every time it is shown.
 DEMO_SEED = 20261
-DEMO_ENTITIES = 9
+DEMO_ENTITIES = 15
 DEMO_ALERTS_PER_ENTITY = 350
 
 DEMO_DIRNAME = "demo"
@@ -89,8 +100,29 @@ class DemoService:
         return self.project_root / "data" / DEMO_DIRNAME
 
     def is_ready(self) -> bool:
-        """Whether the dataset already exists and looks complete."""
-        return (self.dataset_path / "alerts.csv").is_file()
+        """
+        Whether a usable dataset for the CURRENT configuration exists.
+
+        Checking only that a file is present is not enough. The dataset
+        is cached between runs, so after the entity count changes — as
+        it did when the peer groups had to grow for the sector-relative
+        rules — a stale folder from an earlier version would be reused
+        silently, and the demonstration would quietly stop exercising
+        the rules it was enlarged to exercise. Worse on an upgraded
+        install than here, because nobody would think to look.
+        """
+        alerts = self.dataset_path / "alerts.csv"
+        socs = self.dataset_path / "socs.csv"
+        if not alerts.is_file() or not socs.is_file():
+            return False
+
+        try:
+            with open(socs, encoding="utf-8") as handle:
+                entities = sum(1 for _ in handle) - 1   # minus the header
+        except OSError:
+            return False
+
+        return entities == DEMO_ENTITIES
 
     def prepare(self,
                  progress: Optional[Callable[[str], None]] = None,

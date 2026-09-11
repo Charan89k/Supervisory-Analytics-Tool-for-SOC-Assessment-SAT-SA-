@@ -55,8 +55,10 @@ def build_review_queue(execution_gap_findings: pd.DataFrame,
     case_rank, queue_rank.
     """
     weights = cfg["scoring"]["weights"]
-    boosts = cfg.get("review_queue", {}).get("severity_boost", {})
-    top_n = cfg.get("review_queue", {}).get("top_n", 25)
+    review_cfg = cfg.get("review_queue", {})
+    boosts = review_cfg.get("severity_boost", {})
+    top_n = review_cfg.get("top_n", 25)
+    per_entity_cases = int(review_cfg.get("per_entity_cases", 1))
 
     frames = []
     if execution_gap_findings is not None and not execution_gap_findings.empty:
@@ -69,7 +71,7 @@ def build_review_queue(execution_gap_findings: pd.DataFrame,
             "queue_rank", "case_rank", "soc_id", "finding_type", "rule_id", "severity",
             "alert_id", "case_id", "assigned_analyst_id", "rationale", "evidence",
             "finding_weight", "severity_boost", "queue_priority",
-            "case_priority", "case_finding_count",
+            "case_priority", "case_finding_count", "selection_reason",
         ])
 
     all_findings = pd.concat(frames, ignore_index=True)
@@ -100,13 +102,23 @@ def build_review_queue(execution_gap_findings: pd.DataFrame,
     all_findings["case_priority"] = case_priority
     all_findings["case_finding_count"] = case_finding_count
 
-    # Dense-rank cases by case_priority (ties share a rank), then sort
-    # so all findings in the same case sit next to each other with the
-    # worst case first, and within a case the worst finding first.
+    # Rank cases by case_priority, then sort so all findings in the same
+    # case sit next to each other with the worst case first, and within
+    # a case the worst finding first.
+    #
+    # case_id_key breaks ties. Without it the sort is over one column,
+    # which pandas performs with an unstable algorithm, so two cases of
+    # equal priority could swap places between runs or pandas versions.
+    # Priorities here are small discrete numbers and ties are common, so
+    # that is a real reproducibility risk for a tool whose output is
+    # meant to be re-derivable by an examiner.
     case_order = (
-        all_findings[["case_id_key", "case_priority"]]
-        .drop_duplicates()
-        .sort_values("case_priority", ascending=False)
+        all_findings.groupby("case_id_key", sort=False)
+        .agg(case_priority=("queue_priority", "sum"),
+             soc_id=("soc_id", "first"))
+        .reset_index()
+        .sort_values(["case_priority", "case_id_key"], ascending=[False, True])
+        .reset_index(drop=True)
     )
     case_order["case_rank"] = range(1, len(case_order) + 1)
 
@@ -120,16 +132,56 @@ def build_review_queue(execution_gap_findings: pd.DataFrame,
     ).reset_index(drop=True)
     queue["queue_rank"] = queue.index + 1
 
-    # Keep every finding belonging to a top-N case, not just the first
-    # N rows — a 3-finding case ranked #1 should show all 3 findings,
-    # even if that means slightly more than top_n total rows.
-    top_case_keys = case_order.head(top_n)["case_id_key"]
-    queue = queue[queue["case_id_key"].isin(top_case_keys)].reset_index(drop=True)
+    # ---- selection: global priority, plus per-entity coverage --------
+    #
+    # A purely global top-N starves entities. Measured on a 30-entity
+    # submission: 21 of 30 received no queue item at all, including one
+    # ranked 3rd by risk score with 202 CRITICAL findings. A few
+    # high-volume entities own every top case, and a supervisor working
+    # the queue would never look at the other 70% of the CSEs they are
+    # responsible for.
+    #
+    # So selection happens at two levels. The global top-N is unchanged.
+    # On top of it, every entity contributes its own worst case(s), so
+    # each CSE with anything worth reviewing is represented. Ordering is
+    # untouched — still case_priority, descending — and every selected
+    # case keeps the global case_rank it earned, so nothing is promoted
+    # above a case that outranks it.
+    #
+    # An entity with no findings produces no cases and is not forced in:
+    # a clean entity is absent from the queue, which is the correct
+    # supervisory statement about it.
+    global_keys = set(case_order.head(top_n)["case_id_key"])
+
+    entity_keys = set()
+    if per_entity_cases > 0:
+        entity_keys = set(
+            case_order.sort_values(
+                ["soc_id", "case_priority", "case_id_key"],
+                ascending=[True, False, True])
+            .groupby("soc_id", sort=False)
+            .head(per_entity_cases)["case_id_key"]
+        )
+
+    selected = global_keys | entity_keys
+
+    # Keep every finding belonging to a selected case, not just the
+    # first N rows — a 3-finding case ranked #1 should show all 3
+    # findings, even if that means more rows than there are cases.
+    queue = queue[queue["case_id_key"].isin(selected)].reset_index(drop=True)
+
+    # Why each case is in the queue, so the UI can separate "the worst
+    # things anywhere" from "the worst thing at this CSE" without
+    # re-deriving the selection.
+    queue["selection_reason"] = queue["case_id_key"].apply(
+        lambda key: "global_priority" if key in global_keys else "entity_coverage"
+    )
 
     keep_cols = [c for c in [
         "queue_rank", "case_rank", "soc_id", "finding_type", "rule_id", "severity", "alert_id", "case_id",
         "assigned_analyst_id", "rationale", "evidence", "finding_weight",
         "severity_boost", "queue_priority", "case_priority", "case_finding_count",
+        "selection_reason",
     ] if c in queue.columns]
 
     return queue[keep_cols]

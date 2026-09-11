@@ -91,6 +91,33 @@ class AssessmentRun:
     def exists(self) -> bool:
         return self.results_path().is_file()
 
+    def period_directories(self):
+        """
+        (label, path) for each per-period output directory, oldest
+        first; empty for a single-period run.
+
+        A multi-period assessment writes its cross-period artifacts at
+        the run root and each period's own outputs under periods/<name>/.
+        Anything that lists a run's outputs has to know that, so the
+        knowledge lives here with the rest of the run layout rather than
+        being re-derived by each caller.
+        """
+        root = self.path / "periods"
+        if not root.is_dir():
+            return []
+        return [(entry.name, entry)
+                for entry in sorted(root.iterdir())
+                if entry.is_dir() and any(entry.iterdir())]
+
+    def artifact_directories(self):
+        """
+        Every directory holding artifacts for this run, labelled.
+
+        The run root first, then one entry per period. A caller that
+        walks this list cannot miss an output the pipeline wrote.
+        """
+        return [(None, self.path)] + list(self.period_directories())
+
 
 class HistoryService:
     """Creates, lists and loads assessment runs."""
