@@ -12,6 +12,7 @@ Produces:
 import argparse
 import json
 import os
+import sys
 
 import yaml
 import pandas as pd
@@ -441,7 +442,31 @@ def run_pipeline(
     return assessment_results
 
 
+def _use_utf8_console() -> None:
+    """
+    Make the console able to print the characters this tool uses.
+
+    Windows defaults a console to a legacy code page — cp1252 here —
+    which cannot encode the tick the pipeline prints after each step,
+    so `python main.py` died with a UnicodeEncodeError on Windows
+    before it had assessed anything. POSIX terminals are already UTF-8
+    and are unaffected.
+
+    Applied at the entry points only. Nothing in analytics/ writes to a
+    console, so library use is untouched.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            # A redirected, wrapped or absent stream. Printing is not
+            # worth failing a run over.
+            pass
+
+
 def main():
+    _use_utf8_console()
+
     parser = argparse.ArgumentParser(
         description=f"SAT-SA analytics engine v{APP_VERSION} — headless assessment pipeline.")
     parser.add_argument("--data", default="./data/synthetic", help="Path to input dataset directory")
