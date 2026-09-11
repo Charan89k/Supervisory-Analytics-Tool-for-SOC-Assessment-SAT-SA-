@@ -17,8 +17,12 @@ option.
 exactly one result:
 
 ```
-http://localhost        ← the optional Ollama development backend
+http://localhost        ← the optional local AI runtime, on this machine
 ```
+
+A loopback address. Traffic to it does not leave the host. (Tests and
+the setup script also use the numeric form `127.0.0.1`; both name this
+machine.)
 
 This check is run at the end of every development phase.
 
@@ -56,26 +60,58 @@ python -m venv venv && source venv/bin/activate
 pip install --no-index --find-links wheels/ -r requirements-desktop.txt
 ```
 
-**3. Model (optional).** A `.gguf` file, copied as data. See below.
+**3. AI runtime and model (optional).** Either the files listed in
+`packaging/BUILD.md` for the Ollama path, or a `.gguf` file copied as
+data for the llama.cpp path. See below.
 
 **4. Dataset.** The submission itself.
 
-## The local model
+## The local model: two supported paths
 
-The shipped inference path is **llama.cpp reading a local `.gguf`
-file** — chosen precisely for this environment.
+SAT-SA supports two local inference paths. Both run entirely on the
+assessment machine and neither contacts the internet. They differ in
+what has to be installed and approved, and that difference is the whole
+basis for choosing between them.
 
-| | Ollama | llama.cpp |
+| | Ollama (default) | llama.cpp (strict air-gap) |
 |---|---|---|
 | What is installed | a background service | a Python library |
-| Runtime | a daemon on a TCP port | in-process |
-| Model provisioning | its own out-of-band mechanism | a file you copy |
+| Runtime | a resident daemon on a loopback TCP port | in-process, no port |
+| Model provisioning | the runtime's own mechanism | a file you copy |
+| Configuration by the operator | none — discovered | one file path |
 | Accreditation surface | service + daemon + provisioning | one data file |
 
-The model is a **data file that travels on the same media as the
-dataset**, not installed software.
+### Ollama — the default, because it needs no configuration
 
-### Installing a model
+The shipped default. SAT-SA discovers the runtime and the model itself:
+the operator enters no executable path, no model directory, no endpoint
+and no GGUF path. The whole procedure is to run `SAT-SA-Setup-AI.ps1`
+once and start the application.
+
+The setup script installs from files shipped alongside it, so this path
+works on a machine with no internet. It verifies the installer's
+published SHA-256 before running it, pins the runtime to `127.0.0.1`,
+and changes no firewall rule.
+
+**Ollama is the easiest default. It is not automatically appropriate for
+every air-gapped or accredited environment.** It installs a resident
+background service that listens on a local TCP port and provisions
+models through a mechanism of its own. Those are three separate things
+for an accreditation to review, and some environments will not permit a
+resident service on an assessment host at all. Whether Ollama is
+acceptable is a decision for the accrediting authority for that
+environment — not something this tool can assert on their behalf.
+
+### llama.cpp — where a resident service is not permitted
+
+Fully supported and not deprecated. `LlamaCppBackend` loads a plain
+GGUF **data file** in-process: no service, no daemon, no listening port,
+no separate provisioning mechanism. The model travels on the same media
+as the dataset and is replaced by replacing the file.
+
+Prefer this path where a background service or a listening port is not
+permitted, or where the accreditation position is simpler to argue for
+a data file than for installed software.
 
 ```bash
 pip install --no-index --find-links wheels/ llama-cpp-python
@@ -83,21 +119,50 @@ mkdir -p /opt/sat-sa/models
 cp qwen2.5-7b-instruct-q4_k_m.gguf /opt/sat-sa/models/
 ```
 
-Then in **Settings → AI**: backend `Local model file (llama.cpp)`,
-browse to the file, Save. Status should read **AI AVAILABLE**.
+Then set the backend in `config/assessment_rules.yaml`:
+
+```yaml
+llm_narration:
+  backend: "llamacpp"
+  model_path: "/opt/sat-sa/models/qwen2.5-7b-instruct-q4_k_m.gguf"
+```
+
+The model-file picker appears in **Settings → AI** only on this path,
+where a file genuinely has to be named. Status should read
+**AI READY**.
+
+### Choosing
+
+```
+DEFAULT          SAT-SA -> Ollama -> Qwen 2.5 7B      (zero configuration)
+STRICT AIR-GAP   SAT-SA -> llama.cpp -> local GGUF    (no service, no port)
+NO AI            deterministic analytics, unchanged
+```
+
+**The assessment must not require internet access under any of these,
+and it does not.** The third row is a first-class option, not a
+degraded one: the deterministic analytics are the product, and they are
+identical in all three cases.
 
 ### Updating a model
 
-Replace the `.gguf` and restart. There is no downloader, no registry,
-and no version negotiation. The path, file size and modification time
-are reported through the status probe, so an assessment can record which
-model artefact was in place.
+On the llama.cpp path, replace the `.gguf` and restart. There is no
+downloader, no registry, and no version negotiation. The path, file
+size and modification time are reported through the status probe, so an
+assessment can record which model artefact was in place.
+
+On the Ollama path, re-run the setup script with the new model file in
+`ai\`.
 
 ### Running without one
 
-The application starts, assesses, and reports **AI NOT CONFIGURED**.
-Every finding keeps its rule-generated rationale. **AI is off by
-default** — a fresh air-gapped install needs no model at all.
+The application starts, assesses, and reports the specific reason AI is
+unavailable — **AI NOT INSTALLED**, **AI NOT RUNNING**, **AI MODEL
+MISSING** or **AI NOT CONFIGURED** — each with the one action that would
+resolve it. Every finding keeps its rule-generated rationale.
+
+**AI is off by default.** A fresh air-gapped install needs no model at
+all, and nothing about the assessment changes without one.
 
 ## Hardware
 

@@ -25,3 +25,13 @@ assessments/
 *.safetensors
 models/
 data/demo/
+
+# Offline AI installation media assembled into the distributable
+# package: a vendor installer and multi-gigabyte model weights. These
+# belong on the distribution media, not in the repository.
+packaging/ai/
+
+# PyInstaller build artifacts.
+build/
+dist/
+self-check.txt

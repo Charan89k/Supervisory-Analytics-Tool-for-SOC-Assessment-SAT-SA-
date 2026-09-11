@@ -19,6 +19,13 @@ from application.widgets.app_icon import application_icon
 
 
 def main():
+    # Answered before Qt starts: the self-check must be able to report a
+    # broken install, and constructing a QApplication is one of the
+    # things that could be broken.
+    if "--self-check" in sys.argv[1:]:
+        from application.self_check import run_self_check
+        sys.exit(run_self_check())
+
     app = QApplication(sys.argv)
 
     app.setApplicationName(APP_NAME)

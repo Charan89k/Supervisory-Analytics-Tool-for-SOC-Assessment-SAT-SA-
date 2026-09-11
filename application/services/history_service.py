@@ -28,6 +28,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+from application.paths import default_history_root
+
 #: Written inside each run directory.
 SUMMARY_FILE = "run.json"
 
@@ -100,7 +102,10 @@ class HistoryService:
         elif override:
             self.root = Path(override)
         else:
-            self.root = (Path(__file__).resolve().parents[2] / "assessments")
+            # Never derived from this file's location: frozen, that is
+            # the bundle's temporary unpack directory, and every stored
+            # assessment would vanish when the application closes.
+            self.root = default_history_root()
 
     # -- creating ----------------------------------------------------
 

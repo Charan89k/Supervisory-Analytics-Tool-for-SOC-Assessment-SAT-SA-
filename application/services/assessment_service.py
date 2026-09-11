@@ -22,6 +22,8 @@ from application.services.ai_config import (
 from application.services.app_settings import AppSettings
 from application.services.history_service import AssessmentRun, HistoryService
 
+from application.paths import config_path
+
 
 class AssessmentService:
     """
@@ -38,11 +40,7 @@ class AssessmentService:
             Path(self.settings.history_directory)
             if self.settings.history_directory else None)
 
-        self.config_path = (
-            self.project_root
-            / "config"
-            / "assessment_rules.yaml"
-        )
+        self.config_path = config_path()
 
 
 

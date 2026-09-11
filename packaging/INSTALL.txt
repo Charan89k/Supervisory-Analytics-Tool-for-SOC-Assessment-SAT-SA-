@@ -1,0 +1,100 @@
+SAT-SA — Installation
+Supervisory Analytics Tool for SOC Assessment
+=============================================
+
+There is no installer and no service to configure. SAT-SA is a folder
+you copy and an executable you run.
+
+
+QUICK START
+-----------
+
+  1. Extract this package anywhere you can write to.
+       Documents\SAT-SA is a good choice.
+       Program Files is NOT: SAT-SA does not need elevation and does
+       not ask for it.
+
+  2. (Optional) Enable local AI explanations — run ONCE:
+
+       Right-click  SAT-SA-Setup-AI.ps1  ->  Run with PowerShell
+
+     Skip this if you do not want AI. Everything below still works:
+     the same findings, the same scores, the same reports.
+
+  3. Start  SAT-SA.exe
+
+That is the whole procedure. If you ran step 2, the AI status in the
+sidebar reads AI READY. You are not asked for a path, a folder, an
+address or a model file at any point — SAT-SA finds these itself.
+
+
+CHECKING THE INSTALLATION
+-------------------------
+
+To confirm an install before handing it a real submission, run:
+
+    SAT-SA.exe --self-check
+
+It reports the rule configuration, the analytics engine, the
+explanation backends, the writable storage location and the AI status,
+then writes the same report to:
+
+    Documents\SAT-SA\self-check.txt
+
+Attach that file to an accreditation record if you need evidence of
+what was verified and when.
+
+
+WHERE YOUR DATA GOES
+--------------------
+
+  Assessments   Documents\SAT-SA\assessments\
+                One immutable, timestamped folder per run. Nothing is
+                ever overwritten.
+
+  Settings      %APPDATA%\SAT-SA\
+
+  Submissions   Wherever you put them. SAT-SA reads them and does not
+                move, modify or copy them elsewhere.
+
+Nothing is written inside the program folder, so the package can be
+replaced on upgrade without losing a single assessment.
+
+
+NETWORK
+-------
+
+SAT-SA makes no external network connection. Not for licensing, not for
+updates, not for telemetry, not for AI.
+
+The optional AI layer talks to 127.0.0.1 — this machine, over the
+loopback interface, which does not leave the host. The setup script
+pins it there explicitly and changes no firewall rule.
+
+Submission data never leaves the machine, with or without AI.
+
+
+IF THE AI SETUP CANNOT COMPLETE
+-------------------------------
+
+On a machine with no internet, SAT-SA-Setup-AI.ps1 installs from files
+shipped beside it. If they are absent it tells you exactly which files
+to place in the .\ai folder and stops without changing anything.
+
+Whatever happens, SAT-SA works. The AI layer only rephrases findings
+the rule engine has already determined; it never creates, removes,
+re-scores or re-prioritises one. Without it, every finding keeps the
+rationale the rule engine wrote.
+
+
+REQUIREMENTS
+------------
+
+  Windows 10 or 11, 64-bit
+  4 GB RAM               for the assessment itself
+  8 GB RAM               additionally recommended for the 7B AI model
+  ~700 MB disk           for the application
+  ~5 GB disk             additionally for the AI model, if used
+
+No Python installation is required. No administrator rights are
+required for SAT-SA itself.

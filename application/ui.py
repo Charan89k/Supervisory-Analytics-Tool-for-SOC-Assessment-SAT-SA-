@@ -63,6 +63,7 @@ from application.version import (
 )
 from application.widgets.app_icon import application_icon
 from application.narration_worker import NarrationWorker
+from application.paths import config_path
 from application.pages.settings_page import SettingsPage
 from application.services.narration_service import NarrationService
 from application.services.settings_service import SettingsService
@@ -2107,8 +2108,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_assessment_config", None) is None:
             try:
                 import yaml
-                with open(self.project_root / "config"
-                           / "assessment_rules.yaml") as handle:
+                with open(config_path()) as handle:
                     self._assessment_config = yaml.safe_load(handle)
             except Exception:
                 self._assessment_config = {}

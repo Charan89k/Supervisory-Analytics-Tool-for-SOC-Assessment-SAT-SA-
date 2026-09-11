@@ -71,10 +71,17 @@ deterministic rationale and evidence remain visible beside it.
 | Situation | Result |
 |---|---|
 | AI disabled | Assessment completes. Every finding keeps its rule rationale. |
-| No model installed | Status reads **AI NOT CONFIGURED**. Assessment completes. |
-| Model file missing | Status reads **AI UNAVAILABLE**. Assessment completes; the skip is logged. |
+| No AI runtime installed | Status reads **AI NOT INSTALLED**. Assessment completes. |
+| Runtime installed, not running | Status reads **AI NOT RUNNING**. Assessment completes. |
+| Runtime running, model absent | Status reads **AI MODEL MISSING**. Assessment completes. |
+| No `.gguf` selected (llama.cpp) | Status reads **AI NOT CONFIGURED**. Assessment completes. |
+| Model file missing (llama.cpp) | Status reads **AI UNAVAILABLE**. Assessment completes. |
 | Backend crashes | Caught and reported as a warning. The assessment is already saved. |
 | Narration cancelled | Partial explanations are kept; everything else keeps its rule rationale. |
+
+Each state carries the single action that would resolve it
+(`BackendStatus.remedy()`), defined once so every surface — settings
+page, status tile, self-check report — gives the same instruction.
 
 **AI is off by default.** A fresh install produces a complete assessment
 with no model present and no configuration.
@@ -83,41 +90,104 @@ with no model present and no configuration.
 
 ```
 LocalLLMBackend
-├── LlamaCppBackend   SHIPPED — a local .gguf file, no service
-├── OllamaBackend     development convenience on a workstation
+├── OllamaBackend     DEFAULT — zero-configuration, discovered runtime
+├── LlamaCppBackend   STRICT AIR-GAP — a local .gguf file, no service
 └── MockBackend       tests and demo — deterministic samples, no model
 ```
 
-### Why llama.cpp rather than Ollama for deployment
+Both real backends run entirely on the assessment machine. Neither
+contacts the internet. They differ in what has to be installed and
+approved, which is the only basis for choosing between them.
 
-Ollama is a **background service**: it needs separate installation, a
-running daemon on a TCP port, and its own out-of-band model
-provisioning — three things an air-gapped accreditation must approve.
+### Ollama is the default because it asks the operator for nothing
 
-`llama.cpp` is an **in-process library** reading a single `.gguf` file
-from a path the operator controls. The model becomes a **data file that
-travels on the same media as the dataset**, not installed software.
-Updating it means replacing the file and restarting.
+`analytics/narration/ollama_runtime.py` discovers the runtime: the
+executable through `PATH` and then the platform's install locations,
+and the model list through the service's own loopback API. SAT-SA never
+reads Ollama's blob store — it asks the service what it has, so it is
+not coupled to another tool's on-disk layout.
+
+No path, no model directory, no endpoint, no `.gguf` location is ever
+requested from the user. Discovery is strictly read-only: it installs
+nothing, starts nothing, and downloads nothing, and a test asserts the
+module has no mechanism to.
+
+**This does not make Ollama suitable for every environment.** It
+installs a resident background service on a local TCP port with its own
+model provisioning. Whether that is acceptable is a decision for the
+accrediting authority — see `OFFLINE_DEPLOYMENT.md`.
+
+### llama.cpp remains fully supported
+
+Not deprecated, and not a fallback. `llama.cpp` is an **in-process
+library** reading a single `.gguf` file from a path the operator
+controls: no service, no daemon, no listening port. The model becomes a
+**data file that travels on the same media as the dataset**, not
+installed software. Updating it means replacing the file and restarting.
+
+Use it wherever a resident service is not permitted.
 
 `llama-cpp-python` is an optional import. An install without it starts,
 assesses, and reports AI status honestly.
 
 ### Status states
 
-Four distinct states, because they need different responses:
+Distinct states, because they need different responses. Collapsing them
+into one "unavailable" would leave an operator with a red light and no
+idea what to do about it:
 
-| State | Meaning |
-|---|---|
-| `AI DISABLED` | Turned off. No backend is contacted at all. |
-| `AI NOT CONFIGURED` | No model file selected, or the library is absent. |
-| `AI UNAVAILABLE` | Configured, but the model is missing or unreachable. |
-| `SAMPLE EXPLANATIONS` | The mock explainer — no language model running. |
-| `AI AVAILABLE` | A real model is ready. |
+| State | Meaning | What resolves it |
+|---|---|---|
+| `AI DISABLED` | Turned off. No backend is contacted at all. | Enable it in Settings |
+| `AI NOT INSTALLED` | No AI runtime found on this machine. | Run `SAT-SA-Setup-AI` once |
+| `AI NOT RUNNING` | Runtime installed; its service is not responding. | Start the service |
+| `AI MODEL MISSING` | Service healthy; the configured model is absent. | Run `SAT-SA-Setup-AI` |
+| `AI NOT CONFIGURED` | llama.cpp path with no model file selected. | Select a `.gguf` in Settings |
+| `AI UNAVAILABLE` | Configured, but unusable for another reason. | See the detail text |
+| `SAMPLE EXPLANATIONS` | The mock explainer — no language model running. | — |
+| `AI READY` | A real model is ready. | — |
+
+**`AI READY` means detected, present and reachable — not that anything
+is running.** It is a statement about availability; narration begins
+only when a supervisor asks for it.
 
 The availability probe has its **own short timeout** (3s) separate from
 the generation timeout (180s), so a dead backend reports itself dead in
 about a second rather than freezing the window for minutes. Probing
 never loads model weights.
+
+## Explanations are requested, never automatic
+
+An assessment takes seconds. Explaining ten findings on a CPU takes
+minutes. Running the second automatically after the first would make
+every assessment feel like it takes minutes, for output the supervisor
+may not have wanted — and for output that, by construction, cannot
+change the result.
+
+So it does not happen. Completing an assessment reports that
+explanations are *available*; it does not start them.
+
+```
+  RUN ASSESSMENT  ──►  findings, scores, reports    (seconds)
+                          │
+                          ▼
+                  Review Queue
+                          │
+                          ▼
+          [ Explain Top Findings ]  ◄── the supervisor decides
+                          │
+                          ▼
+                  explanations, cancellable at any point
+```
+
+The action lives on the Review Queue, beside the findings it explains,
+with the progress and cancel controls. `narration_blocker()` decides in
+one place whether it can run, so the button's enabled state, its
+tooltip and its refusal message cannot disagree with each other.
+
+**AI availability is automatic; AI execution is not.** Detection of the
+runtime happens on its own, in the background, against a short timeout.
+Generation happens when someone asks.
 
 ## Scope — what actually gets explained
 
@@ -165,7 +235,7 @@ template would misrepresent the basis of a finding.
 | Key | Default | Effect |
 |---|---|---|
 | `enabled` | `false` | Master switch |
-| `backend` | `mock` | `llamacpp` · `ollama` · `mock` |
+| `backend` | `ollama` | `ollama` (default) · `llamacpp` · `mock` |
 | `model` | `qwen2.5:7b` | Model identifier for Ollama |
 | `model_path` | `""` | Path to a local `.gguf` for llama.cpp |
 | `temperature` | `0.1` | Low keeps prose close to the evidence |
@@ -175,9 +245,15 @@ template would misrepresent the basis of a finding.
 | `severity_scope` | `critical_high` | Secondary; see above |
 | `max_queue_rank` | `null` | Optional rank cut-off |
 
+An **absent** `backend` key resolves to the default — that is what makes
+the shipped product zero-configuration. A **misspelled** one resolves to
+the sample explainer instead, which labels its own output: a typo must
+not silently start a real model under a name nobody wrote.
+
 `SATSA_NARRATION_BACKEND=mock` overrides the configured backend, so no
-automated run can load a real model. The test suite and UI smoke test
-both set it.
+automated run can load a real model. The test suite asserts this in
+`conftest.py` rather than relying on the configured default, and the UI
+smoke test sets it before any import.
 
 **`qwen2.5:14b` is never the default.** It needs roughly 9 GB resident
 and is unusable on modest hardware; a default that hangs the machine it

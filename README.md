@@ -221,9 +221,17 @@ assessment completes identically — every finding keeps its
 rule-generated rationale. With it on, the default explains **10 of
 ~1,500 findings**, chosen by review-queue rank.
 
-Backends: `llama.cpp` (shipped — a local `.gguf`, no service),
-Ollama (development), and a labelled sample explainer for tests.
-Details: [AI.md](docs/AI.md).
+**Explanations never run automatically.** An assessment takes seconds;
+explaining findings on a CPU takes minutes, and the output cannot change
+the result. So the assessment finishes, and the Review Queue offers
+**[ Explain Top Findings ]** when a supervisor wants them. Availability
+is detected automatically; generation is not.
+
+Backends: **Ollama** (default — zero configuration, the runtime and
+model are discovered, nothing to type), **llama.cpp** (a local `.gguf`,
+no service or port — for environments where a resident daemon is not
+permitted), and a labelled sample explainer for tests. Neither real
+backend contacts the internet. Details: [AI.md](docs/AI.md).
 
 ## Validation
 
@@ -344,9 +352,11 @@ nothing about whether it contains findings.
 **"does not contain multiple period subdirectories"** on `--trends`.
 Generate with `--periods 4`.
 
-**AI shows NOT CONFIGURED.** Expected without a model. Install
-`llama-cpp-python`, point Settings at a `.gguf`, or select *Sample
-explanations* to see the flow with no model.
+**AI shows NOT INSTALLED / NOT RUNNING / MODEL MISSING.** Expected
+without a local runtime, and never a problem for an assessment. Each
+state names the one action that resolves it; on a packaged install that
+action is usually running `SAT-SA-Setup-AI` once. `SAT-SA --self-check`
+reports the current state and writes it to a file.
 
 **Peer benchmarking says the group is too small.** Fewer than three
 entities in a sector. Regenerate with more, e.g. `--socs 12`.
