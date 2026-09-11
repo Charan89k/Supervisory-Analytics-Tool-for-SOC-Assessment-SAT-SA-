@@ -18,6 +18,7 @@ import pandas as pd
 import numpy as np
 
 from analytics.ingestion import IngestionError
+from analytics.validation import GROUND_TRUTH_FILE
 from analytics.loader import load_soc_dataset
 from analytics.validator import validate_dataset, DatasetValidationError
 from analytics.normalizer import normalize_dataset, build_alerts_enriched
@@ -38,6 +39,11 @@ from analytics.llm_narration import narrate_queue
 from analytics.narration import resolve_backend_name
 from analytics.reporting import write_csv_exports, write_pdf_report
 from analytics.trends import build_trends
+from analytics.validation import (
+    format_report,
+    load_ground_truth,
+    validate,
+)
 
 
 def load_config(config_path: str) -> dict:
@@ -51,6 +57,45 @@ def df_records(df: pd.DataFrame) -> list:
         return []
     clean = df.astype(object).where(pd.notnull(df), None)
     return clean.to_dict(orient="records")
+
+
+def run_validation(data_path: str, out_path: str, config_path: str):
+    """
+    Assess a dataset and measure the result against its seeded ground
+    truth.
+
+    Only possible where the dataset carries labels. A real submission
+    does not, and the absence of labels means "cannot validate" — never
+    "nothing was wrong".
+    """
+    ground_truth = load_ground_truth(data_path)
+    if ground_truth is None:
+        raise ValueError(
+            f"No {GROUND_TRUTH_FILE} beside {data_path}.\n\n"
+            "Validation measures detection against conditions known to "
+            "have been injected. A submission without labels cannot be "
+            "validated — which says nothing about whether it contains "
+            "findings. Generate a labelled dataset with "
+            "data/generator/generate_dataset.py.")
+
+    cfg = load_config(config_path)
+    results = run_pipeline(data_path, out_path, config_path)
+
+    data = load_soc_dataset(data_path)
+    report = validate(results, ground_truth, dataset=data_path,
+                       alerts=data.get("alerts"), config=cfg)
+
+    text = format_report(report)
+    print()
+    print(text)
+
+    os.makedirs(out_path, exist_ok=True)
+    report_path = os.path.join(out_path, "validation_report.txt")
+    with open(report_path, "w") as handle:
+        handle.write(text + "\n")
+    print(f"Validation report written to: {report_path}")
+
+    return report
 
 
 def detect_periods(data_path: str) -> list:
@@ -368,6 +413,10 @@ def main():
     parser.add_argument("--config", default="config/assessment_rules.yaml", help="Path to rules config")
     parser.add_argument("--export-csv", action="store_true", help="Also write flat CSV exports")
     parser.add_argument("--export-pdf", action="store_true", help="Also write a PDF executive summary")
+    parser.add_argument("--validate", action="store_true",
+                         help="Measure detection against the dataset's "
+                              "seeded ground truth (synthetic datasets "
+                              "only) and write a validation report")
     parser.add_argument("--trends", action="store_true",
                          help="Assess every period subdirectory under --data "
                               "independently and write a trend comparison")
@@ -377,7 +426,9 @@ def main():
     args = parser.parse_args()
 
     try:
-        if args.trends:
+        if args.validate:
+            run_validation(args.data, args.out, args.config)
+        elif args.trends:
             run_multi_period_pipeline(
                 args.data, args.out, args.config,
                 export_csv=args.export_csv, export_pdf=args.export_pdf,
@@ -392,6 +443,11 @@ def main():
         raise SystemExit(1)
     except IngestionError as exc:
         print(exc.message())
+        raise SystemExit(1)
+    except ValueError as exc:
+        # Raised by --validate on an unlabelled dataset and by --trends
+        # on a single-period one. Both are usage answers, not crashes.
+        print(exc)
         raise SystemExit(1)
 
 

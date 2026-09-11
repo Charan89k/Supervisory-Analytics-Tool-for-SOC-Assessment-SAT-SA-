@@ -23,11 +23,15 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import random
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+
+#: Seeded ground truth lives beside the dataset under this name.
+GROUND_TRUTH_FILE = "ground_truth.json"
 
 SEVERITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 SEVERITY_WEIGHTS = [0.45, 0.30, 0.18, 0.07]
@@ -215,6 +219,21 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
     alerts, alert_events, cases, escalations = [], [], [], []
     actions, evidence, incidents, telemetry, policies = [], [], [], [], []
 
+    # Ground truth: which conditions were DELIBERATELY injected into
+    # which records. The generator has always known this and thrown it
+    # away, leaving nothing to measure detection against. Kept separate
+    # from the tables so it can never be mistaken for submitted
+    # evidence — see write_ground_truth.
+    injected_alerts = {}
+    injected_entities = {}
+
+    def inject(alert_id, condition):
+        injected_alerts.setdefault(alert_id, []).append(condition)
+
+    def inject_entity(soc_id, condition, detail=None):
+        injected_entities.setdefault(soc_id, []).append(
+            {"condition": condition, "detail": detail})
+
     sectors_assigned = assign_sectors(n_socs)
 
     profiles_assigned = []
@@ -282,6 +301,24 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
 
         n_alerts = max(5, int(alerts_per_soc * cfg["volume_mult"]))
 
+        # Deliberately sparse volume is what LOW_ACTIVITY_OUTLIER exists
+        # to find. Recorded only when the multiplier is genuinely low —
+        # a profile at full volume is not a seeded low-activity case.
+        if cfg["volume_mult"] < 0.5:
+            inject_entity(soc_id, "LOW_ACTIVITY_OUTLIER",
+                           f"volume multiplier {cfg['volume_mult']}")
+
+        # Record-keeping rules are entity-level and coverage-based, so
+        # the seeded truth is the RATE, not a specific record. The
+        # validator compares against the rule's own threshold rather
+        # than assuming a low rate must fire.
+        if cfg["escalation_records"] < 0.5:
+            inject_entity(soc_id, "MISSING_ESCALATION_RECORDS",
+                           f"escalation record rate {cfg['escalation_records']:.2f}")
+        if cfg["investigation_notes"] < 0.5:
+            inject_entity(soc_id, "MISSING_INVESTIGATIONS",
+                           f"investigation note rate {cfg['investigation_notes']:.2f}")
+
         # An entity with no tooling for a class of threat never
         # produces that alert category at all. Modelled explicitly
         # rather than left to chance, so MISSING_ALERT_CATEGORY has
@@ -292,6 +329,8 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
         if n_missing_categories:
             omitted_categories = random.sample(CATEGORIES, n_missing_categories)
             soc_categories = [c for c in CATEGORIES if c not in omitted_categories]
+            for omitted in omitted_categories:
+                inject_entity(soc_id, "MISSING_ALERT_CATEGORY", omitted)
 
         # A small pool of assets that keep alerting without ever being
         # remediated. Each is pinned to one category so the recurrence
@@ -314,6 +353,7 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
                 and random.random() < cfg.get("recurring_unremediated", 0)
             )
             if is_recurring_unremediated:
+                inject(alert_id, "REPEATED_ALERT_WITHOUT_REMEDIATION")
                 asset_id, category = random.choice(problem_assets)
             else:
                 asset_id = f"ASSET-{random.randint(1, 500):04d}"
@@ -344,6 +384,8 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
             ack_target_minutes = {"LOW": 60, "MEDIUM": 30, "HIGH": 15, "CRITICAL": 10}[severity]
             is_slow = random.random() < cfg["slow_triage"]
             ack_delay = ack_target_minutes * random.uniform(3, 6) if is_slow else ack_target_minutes * random.uniform(0.1, 0.9)
+            if is_slow:
+                inject(alert_id, "SLOW_TRIAGE")
             acked = created + timedelta(minutes=ack_delay)
 
             alert_events.append({"event_id": f"EVT-{alert_id}-1", "alert_id": alert_id,
@@ -358,6 +400,7 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
             triage_sla = {"LOW": 480, "MEDIUM": 240, "HIGH": 90, "CRITICAL": 45}[severity]
             is_fast = severity in ("HIGH", "CRITICAL") and random.random() < cfg["fast_closure"]
             if is_fast:
+                inject(alert_id, "FAST_CLOSURE")
                 duration = random.uniform(1, triage_sla * 0.10)
             else:
                 duration = random.uniform(triage_sla * 0.3, triage_sla * 1.5)
@@ -371,6 +414,9 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
                 status == "CLOSED" and random.random() < cfg.get("rubber_stamp", 0)
             )
 
+            if is_rubber_stamp:
+                inject(alert_id, "ACK_WITHOUT_INVESTIGATION")
+
             if status == "CLOSED":
                 if not is_rubber_stamp:
                     alert_events.append({"event_id": f"EVT-{alert_id}-3", "alert_id": alert_id,
@@ -383,6 +429,7 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
                                       "new_status": "CLOSED"})
                 was_reopened = random.random() < cfg["reopen"]
                 if was_reopened:
+                    inject(alert_id, "REOPENED_CASE")
                     reopened_at = closed + timedelta(hours=random.uniform(1, 72))
                     alert_events.append({"event_id": f"EVT-{alert_id}-5", "alert_id": alert_id,
                                           "event_type": "REOPENED", "timestamp": reopened_at.isoformat(),
@@ -395,6 +442,7 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
             if not has_investigation_note:
                 note = ""
             elif random.random() < cfg["template_notes"]:
+                inject(alert_id, "REPETITIVE_INVESTIGATION")
                 note = random.choice(TEMPLATED_NOTES)
             else:
                 note = f"Investigated {category.lower().replace('_', ' ')} on {alerts[-1]['asset_id']}: {random.choice(RESOLUTION_REASONS)}."
@@ -419,6 +467,8 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
             has_escalation_record = random.random() < cfg["escalation_records"]
             if escalation_required and has_escalation_record:
                 initiated = random.random() >= cfg["missed_escalation"]
+                if not initiated:
+                    inject(alert_id, "MISSED_ESCALATION")
                 escalations.append({
                     "escalation_id": f"ESC-{alert_id}", "alert_id": alert_id, "case_id": case_id,
                     "required": True, "required_level": "TIER2" if severity == "HIGH" else "TIER3",
@@ -441,6 +491,8 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
 
             # --- evidence ---
             has_evidence = random.random() >= cfg["missing_evidence"] if severity in ("HIGH", "CRITICAL") else True
+            if not has_evidence:
+                inject(alert_id, "MISSING_EVIDENCE")
             if has_evidence:
                 evidence.append({
                     "evidence_id": f"EVID-{alert_id}", "alert_id": alert_id, "case_id": case_id,
@@ -480,6 +532,11 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
         for src in expected_sources:
             healthy = random.random() < cfg["telemetry_health"]
             coverage = random.uniform(75, 99.5) if healthy else random.uniform(0, 60)
+            # An expected source below the configured coverage threshold
+            # is what TELEMETRY_GAP looks for. Recorded per source, since
+            # the rule fires per source rather than per entity.
+            if coverage < 70:
+                inject_entity(soc_id, "TELEMETRY_GAP", src)
             telemetry.append({
                 "telemetry_id": f"TEL-{soc_id}-{src}", "soc_id": soc_id, "source_name": src,
                 "source_type": src, "expected": True, "enabled": healthy,
@@ -502,6 +559,14 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
         "mitre_technique_id": m[0], "technique_name": m[1], "tactic": m[2], "description": m[3],
     } for m in MITRE]
 
+    ground_truth = {
+        "alerts": {alert_id: sorted(set(conditions))
+                   for alert_id, conditions in injected_alerts.items()},
+        "entities": injected_entities,
+        "profiles": {f"SOC-{i+1:03d}": profile
+                     for i, profile in enumerate(profiles_assigned)},
+    }
+
     return {
         "socs": pd.DataFrame(socs), "analysts": pd.DataFrame(analysts), "shifts": pd.DataFrame(shifts),
         "alerts": pd.DataFrame(alerts), "alert_events": pd.DataFrame(alert_events),
@@ -509,13 +574,30 @@ def build_dataset(n_socs: int, alerts_per_soc: int, seed: int,
         "actions": pd.DataFrame(actions), "evidence": pd.DataFrame(evidence),
         "incidents": pd.DataFrame(incidents), "telemetry": pd.DataFrame(telemetry),
         "policies": pd.DataFrame(policies), "mitre_techniques": pd.DataFrame(mitre_techniques),
-    }, profiles_assigned
+    }, profiles_assigned, ground_truth
 
 
 def write_period(tables, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     for name, df in tables.items():
         df.to_csv(os.path.join(out_dir, f"{name}.csv"), index=False)
+
+
+def write_ground_truth(ground_truth, out_dir):
+    """
+    Write the seeded ground truth beside the dataset, as JSON.
+
+    Deliberately NOT a CSV table. The loader reads a fixed list of table
+    names from *.csv, so a ground_truth.csv could be mistaken for
+    submitted evidence and, worse, a real CSE submission would then
+    differ structurally from a synthetic one. As JSON it is invisible to
+    ingestion and can only be read by something that asks for it by
+    name.
+    """
+    path = os.path.join(out_dir, GROUND_TRUTH_FILE)
+    with open(path, "w") as handle:
+        json.dump(ground_truth, handle, indent=2, sort_keys=True)
+    return path
 
 
 def main():
@@ -534,11 +616,16 @@ def main():
     args = parser.parse_args()
 
     if args.periods <= 1:
-        tables, profiles = build_dataset(args.socs, args.alerts_per_soc, args.seed)
+        tables, profiles, truth = build_dataset(
+            args.socs, args.alerts_per_soc, args.seed)
         write_period(tables, args.out)
+        write_ground_truth(truth, args.out)
 
         print(f"Generated {args.socs} SOCs, {len(tables['alerts'])} alerts "
               f"-> {args.out}")
+        print(f"Ground truth: {len(truth['alerts'])} labelled alerts, "
+              f"{sum(len(v) for v in truth['entities'].values())} "
+              f"entity-level conditions -> {GROUND_TRUTH_FILE}")
         print("Seeded risk profiles (ground truth):")
         for i, profile in enumerate(profiles):
             print(f"  SOC-{i+1:03d}: {profile}")
@@ -548,14 +635,16 @@ def main():
     total = 0
     labels = []
     for index in range(args.periods):
-        tables, profiles = build_dataset(
+        tables, profiles, truth = build_dataset(
             args.socs, args.alerts_per_soc, args.seed,
             period_index=index, period_count=args.periods,
             days_per_period=args.days_per_period)
 
         label = tables["socs"]["submission_period"].iloc[0]
         labels.append(label)
-        write_period(tables, os.path.join(args.out, label))
+        period_dir = os.path.join(args.out, label)
+        write_period(tables, period_dir)
+        write_ground_truth(truth, period_dir)
         total += len(tables["alerts"])
         print(f"  {label}: {len(tables['alerts'])} alerts")
 
