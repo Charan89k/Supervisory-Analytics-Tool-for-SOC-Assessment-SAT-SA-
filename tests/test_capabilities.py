@@ -21,7 +21,7 @@ import os
 import pytest
 import yaml
 
-from application.services import capability_service as cs
+from analytics import capabilities as cs
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG = os.path.join(ROOT, "config", "assessment_rules.yaml")

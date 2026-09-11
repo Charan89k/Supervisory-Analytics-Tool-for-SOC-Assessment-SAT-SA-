@@ -13,6 +13,8 @@ import os
 
 import pandas as pd
 from reportlab.lib import colors
+
+from analytics import benchmarking, capabilities
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -148,15 +150,110 @@ def _findings_section(findings: list, heading: str, styles, body_style, limit: i
     return elements
 
 
-def write_pdf_report(out_path: str, assessment_results: dict) -> str:
+def _capability_table(entity: dict, config: dict) -> Table:
+    results = capabilities.assess_entity(entity, config)
+    results.sort(key=lambda r: (-r.contribution, r.area.label))
+
+    rows = [["Capability Area", "Findings", "Contribution", "Standing"]]
+    for result in results:
+        rows.append([
+            result.area.label,
+            f"{result.finding_count:,}" if result.assessed else "—",
+            f"{result.contribution:.2f}" if result.assessed else "—",
+            result.status,
+        ])
+
+    table = Table(rows, colWidths=[1.9 * inch, 0.8 * inch, 1.0 * inch,
+                                     1.3 * inch])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
+    ]))
+    return table
+
+
+def _benchmark_table(position) -> Table:
+    rows = [["Finding Type", "Per 100 alerts", "Peer Median",
+              "Compared with peers"]]
+    for comparison in position.notable(limit=6):
+        rows.append([
+            comparison.finding_type.replace("_", " ").title(),
+            f"{comparison.entity_rate:.2f}",
+            f"{comparison.peer_median_rate:.2f}",
+            comparison.label(),
+        ])
+
+    table = Table(rows, colWidths=[1.7 * inch, 0.9 * inch, 0.8 * inch,
+                                     2.6 * inch])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
+    ]))
+    return table
+
+
+def _trend_table(report) -> Table:
+    rows = [["Entity", "First", "Latest", "Change", "Direction", "Ranking"]]
+    ranks = {r.soc_id: r for r in report.rank_changes}
+
+    for soc_id in sorted(report.risk_score):
+        series = report.risk_score[soc_id]
+        rank = ranks.get(soc_id)
+        rows.append([
+            soc_id,
+            f"{series.first:,.1f}" if series.first is not None else "—",
+            f"{series.last:,.1f}" if series.last is not None else "—",
+            series.change_label(),
+            series.direction,
+            rank.label if rank else "—",
+        ])
+
+    table = Table(rows, colWidths=[0.8 * inch, 0.6 * inch, 0.6 * inch,
+                                     2.0 * inch, 0.7 * inch, 1.3 * inch])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
+    ]))
+    return table
+
+
+def write_pdf_report(out_path: str, assessment_results: dict,
+                       config: dict = None, trend_report=None) -> str:
     """
-    Writes the SOC assessment report as: Executive Summary -> Entity
-    Ranking -> one section per entity covering Major Execution Gaps,
-    Negative Space, Evidence, and Risk Drivers. Recommended Actions is
-    intentionally omitted until the Qwen narration layer is wired in —
-    there is no recommendation-generation logic in the pipeline yet,
-    and a placeholder would misrepresent what the tool currently does.
+    The supervisory assessment report.
+
+    Structure: Executive Summary -> Dataset Validation -> Entity Ranking
+    -> Peer Benchmarking -> Trends (only when more than one period was
+    assessed) -> one section per entity covering execution gaps,
+    negative space, risk drivers and capability standing.
+
+    Sections appear only when the data supports them. Peer benchmarking
+    is omitted where every peer group is too small to compare against;
+    trends are omitted entirely for a single period rather than drawn
+    through one point; capability standing is omitted when no mapping is
+    configured. A report that prints an empty section implies the tool
+    looked and found nothing, which is a different claim from not having
+    looked.
+
+    Recommended Actions remains absent: there is no
+    recommendation-generation logic in the pipeline, and the optional
+    narration layer restates findings rather than deciding what to do
+    about them. A placeholder would misrepresent the tool.
     """
+    config = config or {}
     os.makedirs(out_path, exist_ok=True)
     file_path = os.path.join(out_path, "executive_summary.pdf")
 
@@ -199,12 +296,69 @@ def write_pdf_report(out_path: str, assessment_results: dict) -> str:
         ))
     story.append(Spacer(1, 0.15 * inch))
 
+    # ---- Dataset validation ----
+    validation = assessment_results.get("validation_report", {}) or {}
+    story.append(Paragraph("Dataset Validation", h2_style))
+    if validation.get("issue_count"):
+        story.append(Paragraph(
+            f"{validation.get('error_count', 0)} blocking error(s) and "
+            f"{validation.get('warning_count', 0)} warning(s) were recorded "
+            f"when the submission was read. An assessment is only produced "
+            f"when no blocking errors remain.",
+            body_style))
+        for issue in validation.get("issues", [])[:10]:
+            rows = (f" ({issue.get('row_count')} rows)"
+                    if issue.get("row_count") else "")
+            story.append(Paragraph(
+                f"<b>[{issue.get('severity')}]</b> {issue.get('table')}: "
+                f"{issue.get('message')}{rows}", body_style))
+    else:
+        story.append(Paragraph(
+            "The submission passed structural validation with no issues "
+            "recorded.", body_style))
+    story.append(Spacer(1, 0.12 * inch))
+
     # ---- Entity Ranking ----
     story.append(Paragraph("Entity Ranking", h2_style))
     if entities:
         story.append(_ranking_table(entities))
     else:
         story.append(Paragraph("No entities assessed.", body_style))
+
+    # ---- Peer benchmarking ----
+    # Omitted entirely where no peer group is large enough to compare
+    # against. An empty section would imply the tool looked and found
+    # nothing, which is a different claim from not having looked.
+    positions = benchmarking.build_positions(assessment_results)
+    comparable = [p for p in positions if p.comparable]
+    if comparable:
+        story.append(Spacer(1, 0.14 * inch))
+        story.append(Paragraph("Peer Benchmarking", h2_style))
+        story.append(Paragraph(
+            benchmarking.benchmarking_caveat(
+                benchmarking.build_peer_groups(assessment_results)),
+            caption_style))
+        worst = comparable[0]
+        story.append(Paragraph(
+            f"<b>{worst.soc_id}</b> — {worst.position_label}.", body_style))
+        story.append(_benchmark_table(worst))
+    elif positions:
+        story.append(Spacer(1, 0.14 * inch))
+        story.append(Paragraph("Peer Benchmarking", h2_style))
+        story.append(Paragraph(
+            benchmarking.benchmarking_caveat(
+                benchmarking.build_peer_groups(assessment_results)),
+            caption_style))
+
+    # ---- Trends ----
+    # Only when more than one period was actually assessed. A single
+    # period yields no trend, and drawing one would be fabrication.
+    if trend_report is not None and getattr(trend_report, "available", False):
+        story.append(Spacer(1, 0.14 * inch))
+        story.append(Paragraph("Trends Across Submission Periods", h2_style))
+        story.append(Paragraph(trend_report.summary(), body_style))
+        story.append(_trend_table(trend_report))
+
     story.append(PageBreak())
 
     # ---- Per-entity: Major Execution Gaps / Negative Space / Evidence / Risk Drivers ----
@@ -236,6 +390,15 @@ def write_pdf_report(out_path: str, assessment_results: dict) -> str:
             story.append(_risk_drivers_table(entity))
         else:
             story.append(Paragraph("No score breakdown available.", body_style))
+
+        # Capability standing, omitted when no mapping is configured.
+        if capabilities.load_areas(config):
+            story.append(Spacer(1, 0.1 * inch))
+            story.append(Paragraph(
+                "Supervisory Capability Areas", styles["Heading4"]))
+            story.append(Paragraph(
+                capabilities.coverage_statement(config), caption_style))
+            story.append(_capability_table(entity, config))
 
         story.append(PageBreak())
 

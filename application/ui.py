@@ -37,9 +37,9 @@ from PySide6.QtWidgets import (
 
 from analytics.narration.base import STATE_DISABLED, BackendStatus
 from analytics.ingestion import describe_supported_inputs
+from analytics import benchmarking as benchmark_service
+from analytics import capabilities as capability_service
 from application.services import (
-    benchmark_service,
-    capability_service,
     dashboard_service,
     review_service,
     rule_reference,
@@ -2814,116 +2814,118 @@ class MainWindow(QMainWindow):
 
         return page
 
+    #: Known artifacts, in the order a supervisor would want them, with
+    #: what each one is for. Anything the pipeline writes that is not
+    #: listed here still appears — see refresh_reports — so a new output
+    #: can never become invisible to the user by omission.
+    REPORT_ARTIFACTS = [
+        ("executive_summary.pdf", "Executive Summary",
+         "One page per entity: ranking, risk drivers, capability "
+         "standing and peer position."),
+        ("assessment_results.json", "Full Assessment Results",
+         "Every finding with its rule, rationale and evidence. The "
+         "machine-readable record everything else is derived from."),
+        ("entity_risk_scores.csv", "Entity Risk Scores",
+         "Score, rank and the weighted components behind each."),
+        ("execution_gap_findings.csv", "Execution Gap Findings",
+         "Every execution-gap finding, one row each."),
+        ("negative_space_findings.csv", "Negative Space Findings",
+         "Every negative-space finding, one row each."),
+        ("review_queue.csv", "Supervisory Review Queue",
+         "The prioritised findings, with the arithmetic behind each "
+         "position."),
+        ("trend_report.json", "Trend Report",
+         "Comparison across submission periods. Written only when more "
+         "than one period was assessed."),
+        ("validation_report.txt", "Detection Validation Report",
+         "Measured detection against seeded ground truth. Written only "
+         "for a labelled synthetic dataset."),
+        ("run.json", "Run Summary",
+         "What this assessment covered, for the history list."),
+    ]
+
     def refresh_reports(self):
-        if not hasattr(
-            self,
-            "report_list",
-        ):
+        if not hasattr(self, "report_list"):
             return
 
-        # Remove old widgets
         while self.report_list.count():
             item = self.report_list.takeAt(0)
-
             widget = item.widget()
-
             if widget:
                 widget.deleteLater()
 
-        if not self.output_dir.exists():
+        run = self.current_run
+        directory = run.path if run is not None else self.output_dir
+
+        if run is None or not directory.exists():
             self.report_status.setText(
-                "No assessment output directory found."
-            )
+                "No assessment loaded. Run an assessment, or load one from "
+                "History, to see its reports.")
             return
 
-        files = [
-            (
-                "Executive Summary",
-                "executive_summary.pdf",
-            ),
-            (
-                "Assessment Results",
-                "assessment_results.json",
-            ),
-            (
-                "Entity Risk Scores",
-                "entity_risk_scores.csv",
-            ),
-            (
-                "Execution Gap Findings",
-                "execution_gap_findings.csv",
-            ),
-            (
-                "Negative Space Findings",
-                "negative_space_findings.csv",
-            ),
-            (
-                "Supervisory Review Queue",
-                "review_queue.csv",
-            ),
-        ]
+        present = {entry.name for entry in directory.iterdir()
+                   if entry.is_file()}
+        described = {name for name, _, _ in self.REPORT_ARTIFACTS}
 
-        existing = 0
+        listed = 0
+        for name, title, description in self.REPORT_ARTIFACTS:
+            if name in present:
+                self._add_report_row(directory / name, title, description)
+                listed += 1
 
-        for title, filename in files:
-            path = self.output_dir / filename
-
-            if not path.exists():
-                continue
-
-            existing += 1
-
-            row = QFrame()
-            row.setObjectName(
-                "report_row"
-            )
-
-            row_layout = QHBoxLayout(row)
-
-            label = QLabel(title)
-
-            path_label = QLabel(
-                filename
-            )
-
-            path_label.setObjectName(
-                "report_filename"
-            )
-
-            button = QPushButton(
-                "OPEN"
-            )
-
-            button.setCursor(
-                Qt.PointingHandCursor
-            )
-
-            button.clicked.connect(
-                lambda checked=False,
-                p=path: self.open_file(p)
-            )
-
-            row_layout.addWidget(
-                label
-            )
-
-            row_layout.addStretch()
-
-            row_layout.addWidget(
-                path_label
-            )
-
-            row_layout.addWidget(
-                button
-            )
-
-            self.report_list.addWidget(
-                row
-            )
+        # Anything the pipeline wrote that this page does not know about.
+        # Listing it rather than hiding it means a new output can never
+        # become invisible to the user through an oversight here.
+        for name in sorted(present - described):
+            self._add_report_row(
+                directory / name, name,
+                "Produced by this assessment.")
+            listed += 1
 
         self.report_status.setText(
-            f"{existing} report/output file(s) available."
-        )
+            f"{listed} artifact(s) from assessment {run.run_id}, stored in "
+            f"{directory}.")
+
+    def _add_report_row(self, path, title, description):
+        row = QFrame()
+        row.setObjectName("report_row")
+        layout = QHBoxLayout(row)
+
+        text = QVBoxLayout()
+        name = QLabel(title)
+        detail = QLabel(description)
+        detail.setObjectName("caveat")
+        detail.setWordWrap(True)
+        text.addWidget(name)
+        text.addWidget(detail)
+        layout.addLayout(text, 1)
+
+        size = QLabel(self._human_size(path))
+        size.setObjectName("report_filename")
+        layout.addWidget(size)
+
+        filename = QLabel(path.name)
+        filename.setObjectName("report_filename")
+        layout.addWidget(filename)
+
+        button = QPushButton("OPEN")
+        button.setCursor(Qt.PointingHandCursor)
+        button.clicked.connect(lambda checked=False, p=path: self.open_file(p))
+        layout.addWidget(button)
+
+        self.report_list.addWidget(row)
+
+    @staticmethod
+    def _human_size(path) -> str:
+        try:
+            size = float(path.stat().st_size)
+        except OSError:
+            return "—"
+        for unit in ("B", "KB", "MB"):
+            if size < 1024 or unit == "MB":
+                return f"{size:,.0f} {unit}"
+            size /= 1024
+        return f"{size:,.1f} MB"
 
     def open_file(self, path):
         if not path.exists():

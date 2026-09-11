@@ -302,8 +302,17 @@ def main():
     window.evidence_service.reset()
     assert window.case_table.rowCount() > 0
     ok(f"review queue shows {window.case_table.rowCount()} correlated cases")
-    assert "report" in window.report_status.text()
-    ok(f"reports page reads {window.report_status.text()!r}")
+    assert "artifact" in window.report_status.text()
+    ok(f"reports page reads {window.report_status.text()[:70]!r}")
+
+    # Every file the pipeline wrote must be reachable. The page used to
+    # carry a hardcoded list of six while the pipeline produced eight.
+    produced = {f.name for f in window.current_run.path.iterdir()
+                if f.is_file()}
+    listed = window.report_list.count()
+    assert listed == len(produced), (
+        f"{listed} rows for {len(produced)} files: {sorted(produced)}")
+    ok(f"all {listed} produced artifact(s) exposed, none hidden")
 
     print("\n[5b] Results unlock the results pages")
     assert window.session.phase is Phase.LOADED
@@ -577,7 +586,7 @@ def main():
 
     # Contributions must still sum to the entity's own risk score, or a
     # finding has been counted against more than one capability.
-    from application.services import capability_service as _cs
+    from analytics import capabilities as _cs
     soc_id = window.selected_dashboard_entity()
     entity = next(e for e in window.current_result["entities"]
                   if e["soc_id"] == soc_id)
@@ -736,6 +745,22 @@ def main():
     assert stored["page_index"] == 1
     assert stored["geometry"]
     ok(f"geometry and last page ({stored['page_index']}) saved")
+
+    print("\n[15e] Reports follow the loaded assessment")
+    window.show_page(6)
+    window.refresh_history()
+    if window.history_table.rowCount() >= 2:
+        window.history_table.selectRow(1)
+        older = window.selected_run()
+        window.load_selected_run()
+        window.show_page(4)
+        assert window.current_run.run_id == older.summary.run_id
+        assert str(older.path) in window.report_status.text()
+        expected = {f.name for f in older.path.iterdir() if f.is_file()}
+        assert window.report_list.count() == len(expected)
+        ok(f"loading an older run re-points Reports at {older.summary.run_id}")
+    else:
+        ok("only one assessment stored; history re-pointing not exercised")
 
     print("\n[16b] Settings: all sections present and wired")
     window.show_page(7)

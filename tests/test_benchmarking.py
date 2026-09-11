@@ -13,7 +13,7 @@ misread, so most of these tests defend two lines:
 
 import pytest
 
-from application.services.benchmark_service import (
+from analytics.benchmarking import (
     MIN_PEERS,
     RATE_NOISE_FLOOR,
     MetricComparison,

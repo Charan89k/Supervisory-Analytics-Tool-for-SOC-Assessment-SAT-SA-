@@ -37,7 +37,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from application.services import capability_service, rule_reference
+from analytics import capabilities as capability_service
+from application.services import rule_reference
 
 RULE_SEPARATOR = "─" * 46
 

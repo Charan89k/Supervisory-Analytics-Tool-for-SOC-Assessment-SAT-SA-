@@ -162,6 +162,12 @@ def run_multi_period_pipeline(data_path: str, out_path: str, config_path: str,
 
     report = build_trends(period_results)
 
+    # The combined report covers every period, so it is written beside
+    # the current assessment rather than inside any one period.
+    if export_pdf:
+        write_pdf_report(out_path, period_results[-1][1],
+                          load_config(config_path), trend_report=report)
+
     os.makedirs(out_path, exist_ok=True)
 
     # The newest period becomes the current assessment.
@@ -409,7 +415,7 @@ def run_pipeline(
             print(f"  {f}")
 
     if export_pdf:
-        pdf_file = write_pdf_report(out_path, assessment_results)
+        pdf_file = write_pdf_report(out_path, assessment_results, cfg)
         done("PDF executive summary written")
         print(f"  {pdf_file}")
 
