@@ -63,6 +63,12 @@ class AssessmentWorker(QObject):
                 progress_callback=self.progress.emit,
             )
 
+            # (results, ai_config, trend_report, run) — asserted here so a
+            # signature change fails at the seam rather than as an opaque
+            # unpacking error inside a Qt slot.
+            assert len(result) == 4, (
+                f"assessment service returned {len(result)} values, expected 4")
+
             self.finished.emit(result)
 
         except DatasetValidationError as exc:

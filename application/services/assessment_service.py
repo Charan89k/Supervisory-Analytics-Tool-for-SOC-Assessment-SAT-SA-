@@ -19,6 +19,7 @@ from application.services.ai_config import (
     AIConfig,
     create_ai_config,
 )
+from application.services.history_service import AssessmentRun, HistoryService
 
 
 class AssessmentService:
@@ -27,8 +28,10 @@ class AssessmentService:
     deterministic assessment pipeline.
     """
 
-    def __init__(self):
+    def __init__(self, history: Optional[HistoryService] = None):
         self.project_root = Path(__file__).resolve().parents[2]
+        # Each assessment writes to its own immutable run directory.
+        self.history = history or HistoryService()
 
         self.config_path = (
             self.project_root
@@ -36,11 +39,7 @@ class AssessmentService:
             / "assessment_rules.yaml"
         )
 
-        self.outputs_dir = self.project_root / "outputs"
-        self.outputs_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+
 
     # ------------------------------------------------------------------
     # Validation
@@ -105,14 +104,17 @@ class AssessmentService:
         if ai_config is None:
             ai_config = create_ai_config(mode="balanced")
 
-        output_path = self.outputs_dir / "desktop_assessment"
-
         def progress(message: str):
             if progress_callback:
                 progress_callback(message)
 
         periods = self.periods(str(dataset))
         multi_period = len(periods) >= 2
+
+        # A fresh directory per run. Never reuses one, so a completed
+        # assessment can never be overwritten by a later one.
+        run = self.history.create_run(str(dataset), dataset.name)
+        output_path = run.path
 
         progress("Preparing assessment...")
         if multi_period:
@@ -156,6 +158,11 @@ class AssessmentService:
                 "SAT-SA assessment pipeline returned no result."
             )
 
+        self.history.finalise(
+            run, result, trend_report=trend_report,
+            ai_backend=ai_config.backend if ai_config.enabled else "")
+
+        progress(f"Assessment saved to {run.run_id}")
         progress("Assessment completed.")
 
-        return result, ai_config, trend_report
+        return result, ai_config, trend_report, run

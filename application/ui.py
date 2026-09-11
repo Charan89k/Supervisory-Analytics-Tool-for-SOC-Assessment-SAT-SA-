@@ -44,6 +44,7 @@ from application.services import (
     review_service,
     rule_reference,
 )
+from application.services.history_service import HistoryService
 from application.services.evidence_service import (
     EvidenceService,
     SourceUnavailable,
@@ -123,6 +124,7 @@ class MainWindow(QMainWindow):
 
         self.current_finding = None
         self.trend_report = None
+        self.history_runs = []
         self._assessment_config = None
         # Re-reads the submission on demand for source-record drill-down.
         # Cached for the session; reset when a new assessment runs.
@@ -140,7 +142,14 @@ class MainWindow(QMainWindow):
         self.review_queue = []
 
         self.project_root = Path(__file__).resolve().parents[1]
-        self.output_dir = self.project_root / "outputs" / "desktop_assessment"
+
+        # Assessment history. `output_dir` follows the CURRENTLY loaded
+        # run rather than a fixed folder, so Reports always shows the
+        # artifacts of the assessment on screen — including when a past
+        # assessment has been loaded from history.
+        self.history = HistoryService()
+        self.current_run = None
+        self.output_dir = self.history.root
 
         self.build_ui()
         self.build_menu_bar()
@@ -198,6 +207,7 @@ class MainWindow(QMainWindow):
         self.review_button = self.make_nav_button("Review Queue")
         self.reports_button = self.make_nav_button("Reports")
         self.benchmark_button = self.make_nav_button("Benchmarking")
+        self.history_button = self.make_nav_button("History")
         self.settings_button = self.make_nav_button("Settings")
 
         sidebar_layout.addWidget(self.dashboard_button)
@@ -206,6 +216,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(self.review_button)
         sidebar_layout.addWidget(self.reports_button)
         sidebar_layout.addWidget(self.benchmark_button)
+        sidebar_layout.addWidget(self.history_button)
         sidebar_layout.addWidget(self.settings_button)
 
         sidebar_layout.addStretch()
@@ -234,6 +245,7 @@ class MainWindow(QMainWindow):
         self.review_page = self.build_review_page()
         self.reports_page = self.build_reports_page()
         self.benchmark_page = self.build_benchmark_page()
+        self.history_page = self.build_history_page()
         self.settings_page = SettingsPage(self.ai_config)
         self.settings_page.settings_saved.connect(self.ai_settings_saved)
 
@@ -243,6 +255,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.review_page)
         self.pages.addWidget(self.reports_page)
         self.pages.addWidget(self.benchmark_page)
+        self.pages.addWidget(self.history_page)
         self.pages.addWidget(self.settings_page)
 
         root_layout.addWidget(sidebar)
@@ -267,12 +280,16 @@ class MainWindow(QMainWindow):
         self.benchmark_button.clicked.connect(
             lambda: self.show_page(5)
         )
-        self.settings_button.clicked.connect(
+        self.history_button.clicked.connect(
             lambda: self.show_page(6)
+        )
+        self.settings_button.clicked.connect(
+            lambda: self.show_page(7)
         )
 
         self.show_page(0)
         self.refresh_ai_status()
+        self.refresh_history()
 
     # ============================================================
     # NOTIFICATIONS
@@ -337,7 +354,8 @@ class MainWindow(QMainWindow):
             ("Review &Queue", "Ctrl+4"),
             ("&Reports", "Ctrl+5"),
             ("&Benchmarking", "Ctrl+6"),
-            ("&Settings", "Ctrl+7"),
+            ("&History", "Ctrl+7"),
+            ("&Settings", "Ctrl+8"),
         ]):
             action = QAction(label, self)
             action.setShortcut(shortcut)
@@ -513,7 +531,7 @@ class MainWindow(QMainWindow):
         index = stored.get("page_index", 0)
         # Never restore onto a results page: at launch there are no
         # results, and the page would open on its empty state.
-        if isinstance(index, int) and index in (0, 1, 6):
+        if isinstance(index, int) and index in (0, 1, 6, 7):
             self.show_page(index)
 
     def save_window_state(self):
@@ -547,6 +565,7 @@ class MainWindow(QMainWindow):
             self.review_button,
             self.reports_button,
             self.benchmark_button,
+            self.history_button,
             self.settings_button,
         ]
 
@@ -903,7 +922,7 @@ class MainWindow(QMainWindow):
 
         self.ai_settings_button = QPushButton("AI Settings…")
         self.ai_settings_button.setCursor(Qt.PointingHandCursor)
-        self.ai_settings_button.clicked.connect(lambda: self.show_page(6))
+        self.ai_settings_button.clicked.connect(lambda: self.show_page(7))
         ai_row.addWidget(self.ai_settings_button)
 
         layout.addLayout(ai_row)
@@ -1180,7 +1199,9 @@ class MainWindow(QMainWindow):
         import datetime
 
         self.assessment_busy = False
-        self.current_result, self.current_ai_config, self.trend_report = result
+        (self.current_result, self.current_ai_config,
+         self.trend_report, self.current_run) = result
+        self.output_dir = self.current_run.path
         self.session.last_assessment_at = (
             datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
 
@@ -1212,6 +1233,7 @@ class MainWindow(QMainWindow):
         self.refresh_review_queue()
         self.refresh_benchmarking()
         self.refresh_reports()
+        self.refresh_history()
 
         self.notify(
             "info",
@@ -2211,6 +2233,254 @@ class MainWindow(QMainWindow):
 
     def load_review_source_records(self):
         self.load_source_into(self.review_detail_panel)
+
+    # ============================================================
+    # ASSESSMENT HISTORY
+    # ============================================================
+
+    def build_history_page(self):
+        """
+        Past assessments.
+
+        Every completed assessment is kept in its own immutable
+        directory. Loading one from here replaces what is on screen —
+        dashboard, findings, queue, benchmarking and reports all follow
+        the loaded run — so a supervisor can return to an earlier
+        assessment and see exactly what it said.
+
+        Reachable whether or not an assessment is currently loaded:
+        history exists independently of the current session.
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(30, 25, 30, 25)
+
+        title = QLabel("Assessment History")
+        title.setObjectName("page_title")
+        layout.addWidget(title)
+
+        description = QLabel(
+            "Completed assessments, newest first. Each run is kept in "
+            "full and is never overwritten by a later one. Nothing here "
+            "leaves this machine."
+        )
+        description.setObjectName("page_description")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self.history_location = QLabel("")
+        self.history_location.setObjectName("caveat")
+        self.history_location.setWordWrap(True)
+        self.history_location.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Fixed)
+        layout.addWidget(self.history_location)
+
+        controls = QHBoxLayout()
+        self.refresh_history_button = QPushButton("Refresh")
+        self.refresh_history_button.setCursor(Qt.PointingHandCursor)
+        self.refresh_history_button.clicked.connect(self.refresh_history)
+        controls.addWidget(self.refresh_history_button)
+
+        self.load_run_button = QPushButton("Load Selected Assessment")
+        self.load_run_button.setObjectName("primary_button")
+        self.load_run_button.setCursor(Qt.PointingHandCursor)
+        self.load_run_button.setEnabled(False)
+        self.load_run_button.clicked.connect(self.load_selected_run)
+        controls.addWidget(self.load_run_button)
+
+        self.open_run_button = QPushButton("Open Folder")
+        self.open_run_button.setCursor(Qt.PointingHandCursor)
+        self.open_run_button.setEnabled(False)
+        self.open_run_button.clicked.connect(self.open_selected_run)
+        controls.addWidget(self.open_run_button)
+
+        self.delete_run_button = QPushButton("Delete")
+        self.delete_run_button.setCursor(Qt.PointingHandCursor)
+        self.delete_run_button.setEnabled(False)
+        self.delete_run_button.clicked.connect(self.delete_selected_run)
+        controls.addWidget(self.delete_run_button)
+
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        self.history_table = QTableWidget()
+        self.history_table.setColumnCount(8)
+        self.history_table.setHorizontalHeaderLabels([
+            "Run", "Dataset", "Periods", "Entities", "Alerts", "Findings",
+            "Review Queue", "AI"])
+        self.history_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.history_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.history_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.history_table.verticalHeader().setVisible(False)
+        self.history_table.horizontalHeader().setStretchLastSection(True)
+        self.history_table.itemSelectionChanged.connect(
+            self.history_selection_changed)
+        self.history_table.itemDoubleClicked.connect(
+            lambda *_: self.load_selected_run())
+        layout.addWidget(self.history_table, 1)
+
+        self.history_status = QLabel("")
+        self.history_status.setObjectName("caveat")
+        self.history_status.setWordWrap(True)
+        layout.addWidget(self.history_status)
+
+        return page
+
+    def refresh_history(self):
+        if not hasattr(self, "history_table"):
+            return
+
+        self.history_runs = self.history.list_runs()
+        self.history_location.setText(f"Stored locally in {self.history.root}")
+
+        self.history_table.setRowCount(len(self.history_runs))
+        for row, run in enumerate(self.history_runs):
+            summary = run.summary
+            ai = (f"{summary.ai_explained} explained ({summary.ai_backend})"
+                  if summary.ai_backend else "not used")
+            cells = [
+                summary.run_id,
+                summary.dataset_label or "—",
+                (", ".join(summary.periods) if summary.multi_period
+                 else "single"),
+                f"{summary.entities:,}",
+                f"{summary.total_alerts:,}",
+                f"{summary.total_findings:,}",
+                f"{summary.review_queue:,}",
+                ai,
+            ]
+            for column, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if (self.current_run is not None
+                        and summary.run_id == self.current_run.run_id):
+                    item.setForeground(QColor("#7fd1a0"))
+                self.history_table.setItem(row, column, item)
+            self.history_table.item(row, 0).setData(Qt.UserRole, row)
+
+        self.history_table.resizeColumnsToContents()
+
+        if not self.history_runs:
+            self.history_status.setText(
+                "No assessments have been run yet. Completed assessments "
+                "appear here and are kept until you delete them.")
+        else:
+            current = (f" Currently loaded: {self.current_run.run_id}."
+                       if self.current_run is not None else "")
+            self.history_status.setText(
+                f"{len(self.history_runs)} stored assessment(s).{current}")
+
+        self.history_selection_changed()
+
+    def selected_run(self):
+        items = self.history_table.selectedItems()
+        if not items:
+            return None
+        item = self.history_table.item(items[0].row(), 0)
+        index = item.data(Qt.UserRole) if item else None
+        if index is None or index >= len(self.history_runs):
+            return None
+        return self.history_runs[index]
+
+    def history_selection_changed(self):
+        run = self.selected_run()
+        for button in (self.load_run_button, self.open_run_button,
+                        self.delete_run_button):
+            button.setEnabled(run is not None)
+
+    def load_selected_run(self):
+        """
+        Replace the on-screen assessment with a stored one.
+
+        Reads the run's own results file rather than re-running anything:
+        a past assessment must show what it actually said, not what the
+        current rule set would say about the same data now.
+        """
+        run = self.selected_run()
+        if run is None:
+            return
+
+        results = self.history.load_results(run)
+        if results is None:
+            self.notify(
+                "warning", "Assessment Unreadable",
+                f"{run.run_id} could not be read. Its results file may be "
+                "missing or the run may have been interrupted.")
+            return
+
+        self.current_result = results
+        self.current_run = run
+        self.output_dir = run.path
+        self.trend_report = None
+        self.current_finding = None
+
+        # The submission behind a stored run may have moved, so source
+        # drill-down is re-pointed and its cache cleared.
+        self.evidence_service.reset()
+        self.session.set_dataset(run.summary.dataset_path,
+                                  run.summary.dataset_label)
+        self.session.last_assessment_at = run.summary.started_at.replace(
+            "T", " ")[:16]
+
+        self.prepare_result_data()
+        self.session.transition(Phase.LOADED)
+
+        self.refresh_dashboard()
+        self.refresh_findings()
+        self.refresh_review_queue()
+        self.refresh_benchmarking()
+        self.refresh_reports()
+        self.refresh_history()
+        self.refresh_history()
+
+        self.notify(
+            "info", "Assessment Loaded",
+            f"Loaded {run.run_id}.\n\n"
+            f"{run.summary.label()}\n\n"
+            "Dashboard, Findings, Review Queue, Benchmarking and Reports "
+            "now show this assessment.")
+
+        self.show_page(0)
+
+    def open_selected_run(self):
+        run = self.selected_run()
+        if run is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(run.path)))
+
+    def delete_selected_run(self):
+        """
+        Remove one stored assessment. Never automatic: history is not
+        pruned on a schedule, because deciding an assessment no longer
+        matters is a supervisory decision.
+        """
+        run = self.selected_run()
+        if run is None:
+            return
+
+        if self.interactive:
+            confirmed = QMessageBox.question(
+                self, "Delete Assessment",
+                f"Permanently delete {run.run_id}?\n\n"
+                f"{run.summary.label()}\n\n"
+                "Its findings, evidence exports and reports will be "
+                "removed from this machine. This cannot be undone.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if confirmed != QMessageBox.Yes:
+                return
+
+        loaded = (self.current_run is not None
+                  and run.run_id == self.current_run.run_id)
+
+        if not self.history.delete(run):
+            self.notify("warning", "Delete Failed",
+                         f"{run.run_id} could not be removed.")
+            return
+
+        if loaded:
+            self.current_run = None
+            self.output_dir = self.history.root
+
+        self.refresh_history()
+        self.refresh_reports()
 
     # ============================================================
     # PEER BENCHMARKING

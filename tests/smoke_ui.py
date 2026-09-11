@@ -30,6 +30,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["SATSA_NARRATION_BACKEND"] = "mock"
 # Never read or write the developer's real settings file.
 os.environ["SATSA_CONFIG_DIR"] = tempfile.mkdtemp(prefix="satsa-smoke-config-")
+# Assessment history in a throwaway directory, so a smoke run never
+# writes into the developer's real history.
+os.environ["SATSA_ASSESSMENTS_DIR"] = tempfile.mkdtemp(prefix="satsa-smoke-hist-")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -104,9 +107,9 @@ def main():
     window.show()
 
     print("\n[1] Window construction")
-    assert window.pages.count() == 7
-    ok("seven pages present (Dashboard, Assessment, Findings, Queue, "
-       "Reports, Benchmarking, Settings)")
+    assert window.pages.count() == 8
+    ok("eight pages present (Dashboard, Assessment, Findings, Queue, "
+       "Reports, Benchmarking, History, Settings)")
     assert not window.run_button.isEnabled()
     ok("RUN disabled until a dataset validates")
 
@@ -687,6 +690,44 @@ def main():
     assert window.trend_panel.isHidden()
     assert "no trend data" in window.trend_note.text().lower()
     ok("single period hides the panel and says why")
+
+    print("\n[15d] Assessment history keeps every run")
+    window.show_page(6)
+    window.refresh_history()
+    before = window.history_table.rowCount()
+    assert before > 0, "completed assessments were not recorded"
+    ok(f"{before} assessment(s) recorded in history")
+
+    run_ids = [r.summary.run_id for r in window.history_runs]
+    assert len(set(run_ids)) == len(run_ids)
+    paths = [r.path for r in window.history_runs]
+    assert len(set(paths)) == len(paths)
+    ok("every run has a distinct id and directory")
+
+    for run in window.history_runs:
+        assert run.results_path().is_file(), run.run_id
+    ok("every stored run still has its results file — none overwritten")
+
+    # Load the oldest run back and confirm the whole application follows it.
+    oldest = window.history_runs[-1]
+    window.history_table.selectRow(len(window.history_runs) - 1)
+    window.load_selected_run()
+    assert window.current_run.run_id == oldest.summary.run_id
+    assert window.output_dir == oldest.path
+    assert window.risk_table.rowCount() > 0
+    assert len(window.findings) > 0
+    ok(f"loaded {oldest.summary.run_id}; dashboard and findings follow it")
+
+    # Deleting is explicit and removes only what was asked for.
+    doomed = window.history_runs[0]
+    window.history_table.selectRow(0)
+    window.delete_selected_run()
+    window.refresh_history()
+    assert window.history_table.rowCount() == before - 1
+    assert doomed.summary.run_id not in [
+        r.summary.run_id for r in window.history_runs]
+    assert all(r.results_path().is_file() for r in window.history_runs)
+    ok("deleting one run leaves the others intact")
 
     print("\n[16] Window state persists")
     window.show_page(1)
