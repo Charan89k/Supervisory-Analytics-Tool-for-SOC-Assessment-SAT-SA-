@@ -22,7 +22,6 @@ must complete on a machine where no model exists:
 
 from __future__ import annotations
 
-import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
@@ -134,39 +133,19 @@ class NarrationResult:
         return f"Generated locally by {self.model} via {self.backend}."
 
 
-PROMPT_TEMPLATE = """You are a supervisory-analytics assistant for SAT-SA, a tool that \
-helps supervisors review how a Security Operations Centre handled its own alerts.
-
-You are given ONE finding that a deterministic rule engine has already decided is \
-real. Your only task is to restate it clearly for a human supervisor.
-
-You MUST NOT: create findings, remove findings, change the severity, change any \
-score, invent evidence, invent events, invent entities, or assert anything the \
-supplied evidence does not state. If something is not in the evidence, say it is \
-not available rather than inferring it.
-
-finding_type: {finding_type}
-rule_id: {rule_id}
-severity: {severity}
-entity: {soc_id}
-rule_rationale: {rationale}
-evidence: {evidence}
-
-Write 2-3 sentences covering what was detected and why it matters to a supervisor, \
-then one sentence naming a concrete next review step. Plain text only, no headings, \
-no markdown, no bullet points."""
-
-
 def build_prompt(finding: dict) -> str:
-    """The single prompt every real backend uses, so they stay comparable."""
-    return PROMPT_TEMPLATE.format(
-        finding_type=finding.get("finding_type", "UNKNOWN"),
-        rule_id=finding.get("rule_id", "UNKNOWN"),
-        severity=finding.get("severity") or "N/A",
-        soc_id=finding.get("soc_id", "N/A"),
-        rationale=finding.get("rationale", ""),
-        evidence=json.dumps(finding.get("evidence", {}), default=str, sort_keys=True),
-    )
+    """
+    The single prompt every real backend uses, so they stay comparable.
+
+    Delegates to `narration.prompt`, which renders every field the
+    finding actually carries. This used to format six fields and drop
+    the other eight that `finding_view` had carefully copied — the model
+    never saw the alert id, the case id, the analyst, or the finding's
+    rank, so it could only paraphrase the rule's own rationale back.
+    """
+    from analytics.narration.prompt import build_explanation_prompt
+
+    return build_explanation_prompt(finding)
 
 
 class LocalLLMBackend(ABC):

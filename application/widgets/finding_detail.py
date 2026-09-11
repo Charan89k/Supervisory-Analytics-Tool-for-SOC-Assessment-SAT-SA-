@@ -47,6 +47,8 @@ class FindingDetailPanel(QWidget):
     """Read-only presentation of one finding and its audit chain."""
 
     source_requested = Signal()
+    #: The examiner asked for an explanation of the finding on screen.
+    explanation_requested = Signal()
 
     def __init__(self, source_hint: str = ""):
         super().__init__()
@@ -118,15 +120,38 @@ class FindingDetailPanel(QWidget):
         self.ai_panel.setObjectName("ai_panel")
         ai_layout = QVBoxLayout(self.ai_panel)
 
+        header_row = QHBoxLayout()
+
         self.ai_header = QLabel("")
         self.ai_header.setObjectName("ai_panel_header")
         self.ai_header.setWordWrap(True)
-        ai_layout.addWidget(self.ai_header)
+        header_row.addWidget(self.ai_header, 1)
+
+        # Explains THIS finding, as opposed to the queue-wide action on
+        # the Review Queue page. An examiner reading one case should not
+        # have to wait for ten explanations to get the one in front of
+        # them.
+        self.explain_button = QPushButton("Explain with Local AI")
+        self.explain_button.setObjectName("explain_button")
+        self.explain_button.setCursor(Qt.PointingHandCursor)
+        self.explain_button.setToolTip(
+            "Ask the local model to restate this finding in plainer "
+            "language. The finding, its rule and its evidence above are "
+            "unaffected and remain the authoritative record.")
+        self.explain_button.clicked.connect(self.explanation_requested.emit)
+        header_row.addWidget(self.explain_button)
+
+        ai_layout.addLayout(header_row)
 
         self.ai_text = QTextEdit()
         self.ai_text.setReadOnly(True)
         self.ai_text.setObjectName("ai_panel_text")
-        self.ai_text.setMaximumHeight(150)
+        # A four-section supervisory explanation runs to roughly a
+        # thousand characters. The old 150px cap showed about two lines
+        # of it and hid the evidence and review sections behind a
+        # scrollbar most people never noticed.
+        self.ai_text.setMinimumHeight(180)
+        self.ai_text.setMaximumHeight(340)
         ai_layout.addWidget(self.ai_text)
 
         self.ai_footer = QLabel("")

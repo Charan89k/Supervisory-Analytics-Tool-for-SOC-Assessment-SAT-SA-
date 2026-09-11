@@ -66,6 +66,114 @@ rationale and evidence. The smoke test asserts, on real data, that
 narration text is absent from the authoritative panel while the
 deterministic rationale and evidence remain visible beside it.
 
+## What the model actually receives
+
+The prompt is the only channel from SAT-SA to the model, and it is
+one-way. It is built by `analytics/narration/prompt.py` from the
+finding the deterministic engine already decided, and it is
+**deterministic**: the same finding always produces the same prompt, so
+a prompt can be reproduced and audited beside the explanation it
+generated.
+
+A field that is absent is **omitted**, never rendered as a blank or a
+placeholder — a blank beside a label is something a model can narrate
+as a fact.
+
+```
+=== FINDING (decided by the deterministic rule engine) ===
+- Finding type: ACK_WITHOUT_INVESTIGATION
+- Rule / detector: INVESTIGATION-ABSENT-001
+- Severity (decided by the rule engine): CRITICAL
+- Entity (CSE): SOC-003
+- Organisation: Finance CSE 003
+- Sector / peer group: FINANCE
+- Alert ID: ALT-SOC-003-000230
+- Case ID: CASE-ALT-SOC-003-000230
+- Assigned analyst ID: ANL-SOC-003-001
+
+=== WHY THE RULE FIRED (the engine's own rationale) ===
+Severity CRITICAL alert was acknowledged and later closed, but no
+investigation was ever started on it...
+
+=== EVIDENCE (the recorded facts behind this finding) ===
+- ack_delay_minutes: 51.6
+- acknowledged: True
+- closed: True
+- expected_lifecycle_event: INVESTIGATION_STARTED
+- investigation_started: False
+
+=== SUPERVISORY PRIORITY ===
+- Position in the supervisory review queue: 1
+- Findings correlated onto this same alert: 4
+
+=== OTHER FINDINGS ON THIS SAME ALERT ===
+- REPETITIVE_INVESTIGATION (TEMPLATE-INVESTIGATION-001)
+- MISSING_EVIDENCE (EVIDENCE-REQUIRED-001)
+- SLOW_TRIAGE (ACK-SLA-001)
+
+=== ENTITY CONTEXT ===
+- Entity supervisory risk score: 142.438
+- Percentile within its peer group: 100.0
+
+=== EVIDENCE COMPLETENESS FOR THIS ENTITY ===
+- Records available for the checks that need them: 85%
+```
+
+Only the evidence for **that one finding** is sent. The dataset is never
+handed to the model.
+
+### A regression worth recording
+
+`finding_view()` assembled fourteen fields for the model and the
+original `build_prompt()` formatted **six**, silently dropping the alert
+id, the case id, the analyst and every ranking field. Nothing failed:
+the model simply never learned which alert it was describing, so it
+could only paraphrase the rule's own rationale back and every
+explanation read much the same. `tests/test_prompt_pipeline.py` asserts
+what actually reaches the model, not merely that a prompt was produced.
+
+## Anti-hallucination
+
+Two layers, and the structural one is what actually holds.
+
+**Structural.** The backend is handed a defensive deep copy and the
+service writes back only five `narration_*` fields. A backend that
+rewrites severity, priority, rule id or evidence on the object it was
+given changes nothing, because that object is discarded. A test hands
+it a deliberately hostile backend and asserts exactly that.
+
+**Instructional.** The prompt states the rules the model is asked to
+follow:
+
+- use only the supplied finding and evidence;
+- never invent evidence, alert IDs, case IDs, analyst IDs, timestamps,
+  counts or metrics;
+- never state that an incident, breach or compromise occurred — the
+  evidence describes how alerts were *handled*, not whether an attack
+  succeeded;
+- never change a severity, score or priority; never create, merge,
+  split or dismiss a finding;
+- if the evidence is insufficient, say so rather than filling the gap;
+- distinguish **missing evidence** from **evidence of failure** — an
+  absent record means the activity cannot be confirmed either way;
+- negative-space findings are indicators for review, not proof of
+  non-compliance;
+- write about the entity and its process, never about a named
+  individual's competence.
+
+### Output validation
+
+`validate_explanation()` rejects an empty response, one too short to be
+an explanation, and one that echoed the instructions back. A rejected
+response is **reported as a failure, not stored** — putting a truncation
+beside a finding would place text there that reads as analysis and is
+not.
+
+It is deliberately shallow. It cannot detect a confidently wrong
+statement, and pretending otherwise would be worse than not checking.
+The real defence is that the examiner always has the deterministic
+finding and its evidence on screen beside the explanation.
+
 ## If the model is unavailable
 
 | Situation | Result |
@@ -155,6 +263,23 @@ The availability probe has its **own short timeout** (3s) separate from
 the generation timeout (180s), so a dead backend reports itself dead in
 about a second rather than freezing the window for minutes. Probing
 never loads model weights.
+
+## Two ways to ask for an explanation
+
+| | Where | Scope | Runs |
+|---|---|---|---|
+| **Explain Top Findings** | Review Queue | the top N queued findings | threaded, cancellable, progress bar |
+| **Explain with Local AI** | the finding detail panel | the one finding on screen | on the UI thread behind a wait cursor |
+
+The second exists because an examiner reading one case should not have
+to wait for ten explanations to get the one in front of them. It
+returns a structured outcome — success, explanation, backend, model,
+finding id, error — so the caller can tell "the model said this" from
+"the model could not be reached" and show the right thing either way.
+
+On failure the panel reads **AI EXPLANATION UNAVAILABLE**, states why,
+and says the deterministic assessment is unaffected. The finding, its
+rule and its evidence stay on screen above, unchanged.
 
 ## Explanations are requested, never automatic
 

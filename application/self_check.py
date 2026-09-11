@@ -81,6 +81,38 @@ def _check_backends() -> tuple[bool, str]:
     return True, f"all explanation backends importable ({', '.join(sorted(BACKENDS))})"
 
 
+def _check_explanation_prompt() -> tuple[bool, str]:
+    """
+    Can the explanation layer actually build a prompt?
+
+    `base.build_prompt` imports the prompt builder inside the function,
+    so a packaging tool's static analysis does not always follow it.
+    Missing it breaks explanations in the frozen build ONLY — the worst
+    place to find out. Building a prompt from a synthetic finding costs
+    nothing and needs no model, so it is checked here rather than
+    discovered during a demonstration.
+    """
+    try:
+        from analytics.narration.base import build_prompt
+        from analytics.narration.prompt import validate_explanation
+
+        prompt = build_prompt({
+            "finding_type": "SELF_CHECK",
+            "rule_id": "SELF-CHECK-001",
+            "soc_id": "SOC-SELFCHECK",
+            "evidence": {"self_check": True},
+        })
+    except Exception as exc:
+        return False, f"explanation prompt builder failed: {exc}"
+
+    if "SELF_CHECK" not in prompt or "self_check" not in prompt:
+        return False, "the prompt builder did not include the supplied finding"
+    if not callable(validate_explanation):
+        return False, "explanation validation is unavailable"
+
+    return True, f"explanation prompt builder working ({len(prompt):,} characters)"
+
+
 def _report_ai() -> str:
     """Informational only — never a pass/fail condition."""
     try:
@@ -116,6 +148,7 @@ def run_self_check(stream=None) -> int:
         ("Rule configuration", _check_config),
         ("Analytics engine", _check_engine),
         ("Explanation backends", _check_backends),
+        ("Explanation prompt", _check_explanation_prompt),
         ("Writable storage", _check_writable),
     ]
 

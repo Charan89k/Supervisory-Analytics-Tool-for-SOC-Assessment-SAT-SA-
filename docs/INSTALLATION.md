@@ -162,8 +162,32 @@ runtime reports `AI NOT INSTALLED` and still passes.
 
 ### Building the package
 
-The `.exe` must be built **on Windows** — PyInstaller does not cross-compile.
-See [../packaging/BUILD.md](../packaging/BUILD.md).
+The `.exe` must be built **on Windows** — PyInstaller does not
+cross-compile. From the project root, on a Windows machine:
+
+```powershell
+.\packaging\build_windows.ps1
+```
+
+| Parameter | Effect |
+|---|---|
+| `-Clean` | remove `build\` and `dist\` first; use after editing the spec |
+| `-SkipTests` | skip the suite (not recommended — it is what catches a packaging change that broke an import) |
+
+The script refuses to run on anything but Windows, refuses to build from a
+failing test suite, and runs `SAT-SA.exe --self-check` against the finished
+build — a folder that cannot pass its own self-check is a failed build, not a
+shippable one. It then stages `SAT-SA-Setup-AI.ps1`, `INSTALL.txt` and
+`README.txt` beside the executable.
+
+Output is `dist\SAT-SA\` — a folder, roughly 320 MB. Zip that for
+distribution.
+
+**Not yet done:** as of v0.9.1 the Windows executable has not been built or
+tested. The spec and this script are complete, and a Linux build from the same
+spec passes `--self-check`, which proves the import graph and bundled resources
+are correct — but that is not the same as a verified Windows binary. See
+[../packaging/BUILD.md](../packaging/BUILD.md).
 
 ---
 
@@ -263,8 +287,23 @@ file genuinely has to be named. Status should read **AI READY**.
 | `AI READY` | a real model is reachable | — |
 
 `AI READY` means detected, present and reachable. It does **not** mean anything
-is running: explanations begin only when a supervisor selects **Explain Top
-Findings** on the Review Queue.
+is running: explanations begin only when a supervisor asks for one.
+
+### Asking for an explanation
+
+| Action | Where | Scope |
+|---|---|---|
+| **Explain with Local AI** | the finding detail panel, beside the AI heading | the one finding on screen |
+| **Explain Top Findings** | the Review Queue | the top N queued findings, cancellable |
+
+Either way the model receives that finding, its evidence, its position in the
+queue, the other findings on the same alert, and its entity's context — and
+nothing else. The dataset is never sent.
+
+The explanation appears in its own panel, headed **AI EXPLANATION —
+&lt;model&gt;**, with the deterministic finding, rule and evidence unchanged
+above it. If the model cannot be reached the panel reads **AI EXPLANATION
+UNAVAILABLE**, says why, and the assessment is unaffected.
 
 ---
 

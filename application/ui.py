@@ -1629,8 +1629,11 @@ class MainWindow(QMainWindow):
         self.cancel_narration_button.show()
 
         self.narration_thread = QThread()
+        # current_result is passed so each explanation can see its
+        # entity's context — organisation, peer group, risk position,
+        # evidence completeness. Read-only.
         self.narration_worker = NarrationWorker(
-            self.review_queue, self.ai_config)
+            self.review_queue, self.ai_config, results=self.current_result)
         self.narration_worker.moveToThread(self.narration_thread)
 
         self.narration_thread.started.connect(self.narration_worker.run)
@@ -1646,6 +1649,67 @@ class MainWindow(QMainWindow):
             self.narration_thread.deleteLater)
 
         self.narration_thread.start()
+
+    def explain_selected_finding(self, panel):
+        """
+        Explain the ONE finding on screen, on demand.
+
+        Runs on the UI thread behind a wait cursor rather than in a
+        worker: it is a single call the examiner explicitly asked for
+        and is waiting on, and a thread here would buy nothing but a
+        second lifecycle to get wrong. The queue-wide action, which can
+        run for minutes, is threaded and cancellable.
+
+        Nothing written here touches the finding. The deterministic
+        record, its rule and its evidence stay on screen above,
+        unchanged, whether the model succeeds or fails.
+        """
+        # Each panel already tracks what it is showing, which is the
+        # finding the examiner is actually looking at — not whatever the
+        # Findings page happens to have selected.
+        finding = getattr(panel, "current_finding", None)
+        if not finding:
+            self.notify("info", "No Finding Selected",
+                        "Select a finding first, then ask for an explanation.")
+            return
+
+        panel.ai_header.setText("EXPLAINING — local model running…")
+        panel.ai_text.setPlainText(
+            "Asking the local model to restate this finding.\n\n"
+            "This runs on this machine and can take from a few seconds to "
+            "a few minutes depending on the model. The finding and its "
+            "evidence above are unaffected.")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            outcome = NarrationService(config=self.ai_config).explain_finding(
+                finding, results=self.current_result,
+                review_queue=self.review_queue)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if not outcome.get("success"):
+            panel.ai_header.setText("AI EXPLANATION UNAVAILABLE")
+            panel.ai_text.setPlainText(
+                f"{outcome.get('error')}\n\n"
+                "The deterministic assessment is unaffected. This finding, "
+                "its rule and its evidence above remain the authoritative "
+                "record.")
+            panel.ai_footer.setText(
+                "No explanation was generated. Nothing above was changed.")
+            panel.ai_panel.show()
+            return
+
+        # Store it on the record so it survives re-selection and reaches
+        # the review queue view, using the same narration_* fields the
+        # queue-wide pass writes. Nothing else on the record is touched.
+        finding["narrated_explanation"] = outcome["explanation"]
+        finding["narration_source"] = outcome["backend"]
+        finding["narration_model"] = outcome["model"]
+        finding["narration_is_mock"] = outcome.get("is_mock", False)
+        finding["narration_provenance"] = outcome.get("provenance", "")
+
+        panel.show_narration(finding)
 
     def set_narration_status(self, text: str):
         if hasattr(self, "narration_status"):
@@ -1934,6 +1998,8 @@ class MainWindow(QMainWindow):
         # Shared with the Review Queue so the AI-separation rule has one
         # implementation rather than two that could drift apart.
         self.finding_detail_panel = FindingDetailPanel()
+        self.finding_detail_panel.explanation_requested.connect(
+            lambda: self.explain_selected_finding(self.finding_detail_panel))
         self.finding_detail_panel.source_requested.connect(
             self.load_finding_source_records)
         splitter.addWidget(self.finding_detail_panel)
@@ -2396,6 +2462,8 @@ class MainWindow(QMainWindow):
         self.review_detail_panel = FindingDetailPanel()
         self.review_detail_panel.source_requested.connect(
             self.load_review_source_records)
+        self.review_detail_panel.explanation_requested.connect(
+            lambda: self.explain_selected_finding(self.review_detail_panel))
         splitter.addWidget(self.review_detail_panel)
 
         splitter.setSizes([760, 620])

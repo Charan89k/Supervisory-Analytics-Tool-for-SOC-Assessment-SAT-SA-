@@ -21,10 +21,11 @@ class NarrationWorker(QObject):
     finished = Signal(object)            # NarrationOutcome
     failed = Signal(str)
 
-    def __init__(self, review_queue, ai_config: AIConfig):
+    def __init__(self, review_queue, ai_config: AIConfig, results=None):
         super().__init__()
         self.review_queue = review_queue
         self.ai_config = ai_config
+        self.results = results
         self._cancelled = False
 
     @Slot()
@@ -43,6 +44,7 @@ class NarrationWorker(QObject):
                 self.review_queue,
                 progress_callback=lambda done, total: self.progress.emit(done, total),
                 should_cancel=lambda: self._cancelled,
+                results=self.results,
             )
 
             self.finished.emit(outcome)

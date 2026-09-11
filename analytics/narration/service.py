@@ -28,9 +28,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 from analytics.narration import create_backend
+from analytics.narration.prompt import validate_explanation
 from analytics.narration.base import BackendStatus, LocalLLMBackend
 
 #: Practical default for a CPU-only laptop. At 1-4 minutes per call on
@@ -67,10 +68,81 @@ NARRATION_INPUT_FIELDS = (
     "finding_type", "rule_id", "soc_id", "severity", "alert_id", "case_id",
     "assigned_analyst_id", "rationale", "evidence", "queue_rank",
     "case_rank", "queue_priority", "case_priority", "case_finding_count",
+    "finding_id", "capability_area", "selection_reason",
+)
+
+#: Context the finding itself does not carry, merged into the view by
+#: `build_context` below: which organisation and peer group the entity
+#: is, where it ranks, what else landed on the same alert, and how
+#: complete its records are. All of it is already computed by the
+#: deterministic engine — it was simply never offered to the model,
+#: which is why explanations could only paraphrase the rule rationale.
+NARRATION_CONTEXT_FIELDS = (
+    "organization_name", "peer_group", "entity_risk_score",
+    "entity_risk_percentile", "entity_priority_rank",
+    "entity_execution_gap_count", "entity_negative_space_count",
+    "evidence_completeness", "case_sibling_findings",
 )
 
 
-def finding_view(record: dict) -> dict:
+def build_context(results: Optional[dict], review_queue: Optional[List[dict]] = None
+                   ) -> Dict[str, dict]:
+    """
+    Per-entity explanation context, keyed by soc_id.
+
+    Read-only: it consults a finished assessment and computes nothing
+    of its own. Returns an empty mapping when there is no assessment to
+    read, so every caller can pass the result straight through without
+    checking.
+    """
+    context: Dict[str, dict] = {}
+    for entity in ((results or {}).get("entities") or []):
+        soc_id = entity.get("soc_id")
+        if not soc_id:
+            continue
+        completeness = entity.get("evidence_completeness") or {}
+        context[str(soc_id)] = {
+            "organization_name": entity.get("organization_name"),
+            "peer_group": entity.get("peer_group"),
+            "entity_risk_score": entity.get("supervisory_risk_score"),
+            "entity_risk_percentile": entity.get(
+                "supervisory_risk_score_percentile"),
+            "entity_priority_rank": entity.get("priority_rank"),
+            "entity_execution_gap_count": entity.get("execution_gap_count"),
+            "entity_negative_space_count": entity.get("negative_space_count"),
+            "evidence_completeness": {
+                "overall_coverage": completeness.get("overall_coverage"),
+                "limited": completeness.get("limited"),
+                "suppressed_rules": completeness.get("suppressed_rules"),
+            } if completeness else None,
+        }
+    return context
+
+
+def case_siblings(record: dict, review_queue: Optional[List[dict]]) -> List[dict]:
+    """
+    The other findings correlated onto the same alert as `record`.
+
+    One alert carrying four separate failures is a different supervisory
+    conversation from one carrying a single late acknowledgement, and
+    the finding on its own cannot express that.
+    """
+    if not review_queue:
+        return []
+    case_rank = record.get("case_rank")
+    if case_rank is None:
+        return []
+
+    return [
+        {"finding_type": other.get("finding_type"),
+         "rule_id": other.get("rule_id")}
+        for other in review_queue
+        if other is not record and other.get("case_rank") == case_rank
+        and other.get("finding_type")
+    ]
+
+
+def finding_view(record: dict, context: Optional[dict] = None) -> dict:
     """
     A defensive copy of one finding, for handing to a backend.
 
@@ -92,6 +164,17 @@ def finding_view(record: dict) -> dict:
             continue
         value = record[field]
         view[field] = deepcopy(value) if isinstance(value, (dict, list)) else value
+
+    # Context is copied too, and only for keys the contract names, so a
+    # caller cannot widen what a backend sees by passing extra keys.
+    for field in NARRATION_CONTEXT_FIELDS:
+        if not context or field not in context:
+            continue
+        value = context[field]
+        if value is None:
+            continue
+        view[field] = deepcopy(value) if isinstance(value, (dict, list)) else value
+
     return view
 
 
@@ -105,6 +188,8 @@ class NarrationOutcome:
     failed: int = 0
     skipped_out_of_scope: int = 0
     cancelled: bool = False
+    #: Why the most recent explanation was rejected, when one was.
+    last_error: str = ""
 
     def summary(self) -> str:
         if not self.status.available:
@@ -156,9 +241,16 @@ def narrate_review_queue(
     backend: Optional[LocalLLMBackend] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    results: Optional[dict] = None,
 ) -> NarrationOutcome:
     """
     Add explanations to `review_queue` IN PLACE and report what happened.
+
+    `results` is the finished assessment. Supplying it lets each
+    explanation see the entity context the finding alone cannot carry —
+    organisation, peer group, risk position, evidence completeness —
+    and it is read, never written. Omit it and explanations still work
+    from the finding and its evidence.
 
     Every record — explained or not — ends up with a
     `narrated_explanation`. Records that were not explained get their
@@ -176,6 +268,7 @@ def narrate_review_queue(
         record.setdefault("narration_source", "rule")
         record.setdefault("narration_is_mock", False)
 
+    entity_context = build_context(results)
     outcome = NarrationOutcome(status=status, considered=len(review_queue))
 
     if not scope.enabled or not status.available:
@@ -190,11 +283,30 @@ def narrate_review_queue(
             outcome.cancelled = True
             break
 
-        # The backend sees a copy. Anything it does to that copy is
-        # discarded; only the fields written below reach the record.
-        result = backend.explain(finding_view(record))
+        # The backend sees a copy, enriched with read-only context.
+        # Anything it does to that copy is discarded; only the fields
+        # written below reach the record.
+        view = finding_view(record, entity_context.get(str(record.get("soc_id"))))
+        siblings = case_siblings(record, review_queue)
+        if siblings:
+            view["case_sibling_findings"] = siblings
+
+        result = backend.explain(view)
+
+        # A model that returned nothing usable is a failure, not an
+        # explanation. Writing a truncation or an echoed instruction
+        # into the record would put text beside a finding that reads as
+        # analysis and is not.
+        rejection = ""
+        if result is not None:
+            usable, rejection = validate_explanation(result.text, view)
+            if not usable:
+                result = None
+
         if result is None:
             outcome.failed += 1
+            if rejection:
+                outcome.last_error = rejection
         else:
             record["narrated_explanation"] = result.text
             record["narration_source"] = result.backend

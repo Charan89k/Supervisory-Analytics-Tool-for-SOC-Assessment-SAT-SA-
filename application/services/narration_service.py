@@ -17,9 +17,13 @@ from analytics.narration.base import (
     BackendStatus,
     LocalLLMBackend,
 )
+from analytics.narration.prompt import validate_explanation
 from analytics.narration.service import (
     NarrationOutcome,
     NarrationScope,
+    build_context,
+    case_siblings,
+    finding_view,
     narrate_review_queue,
 )
 
@@ -88,7 +92,14 @@ class NarrationService:
         review_queue: List[dict],
         progress_callback: Optional[Callable[[int, int], None]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
+        results: Optional[dict] = None,
     ) -> NarrationOutcome:
+        """
+        `results` is the finished assessment, passed through so each
+        explanation can see its entity's context. Read-only, and
+        optional: without it explanations still work from the finding
+        and its evidence alone.
+        """
         return narrate_review_queue(
             review_queue,
             self.config.to_narration_config(),
@@ -96,11 +107,65 @@ class NarrationService:
             backend=self.backend,
             progress_callback=progress_callback,
             should_cancel=should_cancel,
+            results=results,
         )
 
-    def explain_finding(self, finding: dict) -> Optional[str]:
-        """Single-finding narration, e.g. a 'Regenerate explanation' action."""
+    def explain_finding(self, finding: dict,
+                         results: Optional[dict] = None,
+                         review_queue: Optional[List[dict]] = None) -> dict:
+        """
+        Explain ONE finding — the one the examiner is looking at.
+
+        Returns a structured outcome rather than a bare string, because
+        the caller has to tell the difference between "the model said
+        this" and "the model could not be reached", and show the right
+        thing either way. The finding itself is never modified here; the
+        caller decides what to display.
+        """
+        outcome = {
+            "success": False,
+            "explanation": "",
+            "backend": self.config.backend,
+            "model": self.config.model,
+            "finding_id": finding.get("finding_id") or finding.get("alert_id")
+                          or finding.get("case_id"),
+            "error": None,
+        }
+
         if not self.config.enabled:
-            return None
-        result = self.backend.explain(finding)
-        return result.text if result is not None else None
+            outcome["error"] = ("Local AI explanations are switched off. "
+                                "Enable them in Settings.")
+            return outcome
+
+        status = self.status()
+        if not status.available:
+            outcome["error"] = f"{status.headline()} — {status.detail}"
+            return outcome
+
+        context = build_context(results).get(str(finding.get("soc_id")))
+        view = finding_view(finding, context)
+        siblings = case_siblings(finding, review_queue)
+        if siblings:
+            view["case_sibling_findings"] = siblings
+
+        try:
+            result = self.backend.explain(view)
+        except Exception as exc:                       # never reach the UI raw
+            outcome["error"] = f"The local model could not be reached: {exc}"
+            return outcome
+
+        if result is None:
+            outcome["error"] = ("The local model returned no explanation. "
+                                "The finding and its evidence are unchanged.")
+            return outcome
+
+        usable, reason = validate_explanation(result.text, view)
+        if not usable:
+            outcome["error"] = f"The response was not usable — {reason}."
+            return outcome
+
+        outcome.update(success=True, explanation=result.text,
+                        backend=result.backend, model=result.model,
+                        is_mock=result.is_mock,
+                        provenance=result.provenance())
+        return outcome

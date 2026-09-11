@@ -55,6 +55,13 @@ hiddenimports = [
     "analytics.narration.mock",
     "analytics.narration.ollama_backend",
     "analytics.narration.ollama_runtime",
+    # base.build_prompt imports this INSIDE the function, so static
+    # analysis does not always follow it. Missing it would break
+    # explanations in the packaged build only, which is the worst place
+    # to discover it.
+    "analytics.narration.prompt",
+    # Reported beside the risk score; imported by main, not by a backend.
+    "analytics.completeness",
     # Ingestion adapters are likewise selected at runtime by format.
     *collect_submodules("analytics.ingestion"),
     # reportlab loads its font and graphics machinery dynamically.
