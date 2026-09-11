@@ -71,13 +71,37 @@ class SettingsService:
         merged = {**asdict(fallback),
                   **{k: v for k, v in section.items() if k in known}}
 
+        # The sample explainer is a TEST backend, not a deployment
+        # choice, and it must never become sticky user state. Nothing in
+        # the settings UI can select or clear it — the inference path is
+        # deployment configuration — so a "mock" that reached this file
+        # (a stray test run, a copied profile) would pin the application
+        # to sample explanations permanently, with no way out short of
+        # editing JSON by hand. Fall back to the real default instead.
+        #
+        # Forcing the sample explainer remains possible, through
+        # SATSA_NARRATION_BACKEND, which is per-process and therefore
+        # cannot persist.
+        if str(merged.get("backend", "")).strip().lower() == "mock":
+            merged["backend"] = fallback.backend
+
         try:
             return AIConfig(**merged)
         except (TypeError, ValueError):
             return fallback
 
     def save_ai_config(self, config: AIConfig) -> Path:
-        return self._write_section("ai", asdict(config))
+        """
+        Persist the AI configuration.
+
+        `mock` is never written, for the reason given in
+        `load_ai_config`: it is a test backend, and persisting it
+        strands the application in sample explanations.
+        """
+        stored = asdict(config)
+        if str(stored.get("backend", "")).strip().lower() == "mock":
+            stored["backend"] = AIConfig().backend
+        return self._write_section("ai", stored)
 
     # -- application -------------------------------------------------
 

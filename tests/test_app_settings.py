@@ -21,6 +21,7 @@ from analytics.ingestion import resolve_dataset
 from analytics.ingestion.errors import UnsafeArchiveError
 from analytics.ingestion.limits import DEFAULT_LIMITS
 from analytics.validator import DatasetValidationError
+from application.services.ai_config import AIConfig
 from application.services.app_settings import GIGABYTE, AppSettings
 from application.services.assessment_service import AssessmentService
 from application.services.settings_service import SettingsService
@@ -71,10 +72,13 @@ def test_app_and_ai_sections_coexist(tmp_path):
 
     path = tmp_path / "settings.json"
     service = SettingsService(path)
-    service.save_ai_config(create_ai_config(enabled=True, backend="mock"))
+    service.save_ai_config(create_ai_config(enabled=True, backend="llamacpp"))
     service.save_app_settings(AppSettings(strict_validation=True))
 
-    assert service.load_ai_config().backend == "mock"
+    # A real backend, deliberately: "mock" is never persisted — see
+    # test_the_mock_backend_is_never_persisted. This test is about the
+    # two sections coexisting, not about which backend was chosen.
+    assert service.load_ai_config().backend == "llamacpp"
     assert service.load_app_settings().strict_validation is True
     assert set(json.loads(path.read_text())) == {"ai", "app"}
 
@@ -231,3 +235,66 @@ def test_the_full_results_are_always_written(tmp_path):
         generate_csv_exports=False, generate_pdf_report=False))
     _, _, _, run = service.run_assessment(DATA)
     assert run.results_path().is_file()
+
+
+# ---------------------------------------------------------------------------
+# The sample explainer must never become sticky user state
+# ---------------------------------------------------------------------------
+
+def test_a_persisted_mock_backend_self_heals(tmp_path):
+    """
+    `mock` is a TEST backend, not a deployment choice. Nothing in the
+    settings UI can select or clear it — the inference path is
+    deployment configuration — so a "mock" that reached the settings
+    file would pin the application to sample explanations permanently,
+    with no way out short of editing JSON by hand.
+
+    This happened: a test run that did not isolate SATSA_CONFIG_DIR
+    overwrote a real settings file, and the application reported
+    SAMPLE EXPLANATIONS with a healthy Ollama runtime sitting right
+    there unused.
+    """
+    from dataclasses import asdict
+
+    service = SettingsService(path=tmp_path / "settings.json")
+    service._write_section("ai", {**asdict(AIConfig()),
+                                   "backend": "mock", "enabled": True})
+
+    assert service.load_ai_config().backend == AIConfig().backend
+    assert service.load_ai_config().backend != "mock"
+
+
+def test_the_mock_backend_is_never_persisted(tmp_path):
+    import json
+
+    path = tmp_path / "settings.json"
+    service = SettingsService(path=path)
+    service.save_ai_config(AIConfig(enabled=True, backend="mock"))
+
+    stored = json.loads(path.read_text())["ai"]["backend"]
+    assert stored == AIConfig().backend
+    assert stored != "mock"
+
+
+def test_a_real_backend_still_round_trips(tmp_path):
+    """Self-healing must not overwrite a deliberate choice."""
+    service = SettingsService(path=tmp_path / "settings.json")
+    for backend in ("ollama", "llamacpp"):
+        service.save_ai_config(AIConfig(enabled=True, backend=backend))
+        assert service.load_ai_config().backend == backend
+
+
+def test_forcing_samples_still_works_through_the_environment(tmp_path,
+                                                              monkeypatch):
+    """
+    The escape hatch that replaces it: per-process, so it cannot
+    persist. This is what the test suite itself relies on.
+    """
+    from analytics.narration import resolve_backend_name
+
+    service = SettingsService(path=tmp_path / "settings.json")
+    service.save_ai_config(AIConfig(enabled=True, backend="ollama"))
+    config = service.load_ai_config()
+
+    monkeypatch.setenv("SATSA_NARRATION_BACKEND", "mock")
+    assert resolve_backend_name(config.to_narration_config()) == "mock"
