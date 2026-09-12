@@ -35,3 +35,10 @@ packaging/ai/
 build/
 dist/
 self-check.txt
+
+# Windows packaging output. `build/` and `dist/` above cover a native
+# Windows build; these are the paths used when cross-building under
+# Wine on Linux, where the defaults would collide with a Linux build.
+build-windows/
+dist-windows/
+outputs-win/
