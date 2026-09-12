@@ -496,7 +496,7 @@ All optional. SAT-SA works with none of them set.
 ## 6. Verifying the installation
 
 ```bash
-pytest                                              # 611 tests
+pytest                                              # 626 tests
 QT_QPA_PLATFORM=offscreen python tests/smoke_ui.py  # 112 UI checks
 python desktop.py --self-check                      # installation check
 ```

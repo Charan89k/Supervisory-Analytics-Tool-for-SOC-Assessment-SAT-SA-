@@ -93,6 +93,7 @@ class OllamaBackend(LocalLLMBackend):
         except ImportError:
             return None
 
+        self.last_failure = ""
         try:
             response = requests.post(
                 f"{self.base_url}/api/generate",
@@ -106,13 +107,25 @@ class OllamaBackend(LocalLLMBackend):
             )
             response.raise_for_status()
             text = (response.json().get("response") or "").strip()
-        except Exception:
-            # Unreachable, model missing, or timed out. The caller keeps
+        except requests.exceptions.Timeout:
+            # By far the most common failure, and the least obvious: a
+            # larger model on a CPU-only machine can exceed the timeout
+            # on every single finding, which looks exactly like an AI
+            # that does nothing. Name it, and name the way out.
+            self.last_failure = (
+                f"{self.model} did not answer within {self.timeout}s. "
+                f"A smaller model is faster on this machine, or raise "
+                f"the timeout in AI Settings.")
+            return None
+        except Exception as exc:
+            # Unreachable, model missing, or refused. The caller keeps
             # the deterministic rationale; nothing about the assessment
             # changes.
+            self.last_failure = f"{type(exc).__name__}: {exc}"
             return None
 
         if not text:
+            self.last_failure = f"{self.model} returned an empty response."
             return None
 
         return NarrationResult(

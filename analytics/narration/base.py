@@ -158,6 +158,11 @@ class LocalLLMBackend(ABC):
         self.model = self.config.get("model", "")
         self.temperature = float(self.config.get("temperature", 0.1))
         self.timeout = int(self.config.get("timeout_seconds", 120))
+        #: Why the most recent explain() returned nothing, in a form fit
+        #: to show a supervisor. A backend that fails silently leaves
+        #: "0 explained" indistinguishable from a broken install, and a
+        #: timeout is the failure most likely to be read as the latter.
+        self.last_failure: str = ""
         # Availability must be answerable in about a second. Reusing the
         # generation timeout here would make a dead backend take minutes
         # to report itself dead, with the UI blocked behind it.

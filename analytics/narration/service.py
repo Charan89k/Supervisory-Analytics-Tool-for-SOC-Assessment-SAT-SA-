@@ -200,7 +200,12 @@ class NarrationOutcome:
         parts = [f"{self.explained} of {self.considered} review-queue "
                  f"item(s) explained using {source}"]
         if self.failed:
-            parts.append(f"{self.failed} failed and kept the rule rationale")
+            failed = f"{self.failed} failed and kept the rule rationale"
+            # Without the reason, "0 explained; 1 failed" is a dead end
+            # for anyone trying to fix it.
+            if self.last_error:
+                failed += f" ({self.last_error})"
+            parts.append(failed)
         if self.cancelled:
             parts.append("run cancelled")
         return "; ".join(parts) + "."
@@ -305,8 +310,12 @@ def narrate_review_queue(
 
         if result is None:
             outcome.failed += 1
-            if rejection:
-                outcome.last_error = rejection
+            # A rejection is the model answering unusably; last_failure
+            # is it not answering at all. Either way the supervisor is
+            # owed the reason, not just the count.
+            outcome.last_error = (
+                rejection or getattr(backend, "last_failure", "")
+                or outcome.last_error)
         else:
             record["narrated_explanation"] = result.text
             record["narration_source"] = result.backend

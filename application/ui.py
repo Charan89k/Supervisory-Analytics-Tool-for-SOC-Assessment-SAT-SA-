@@ -878,7 +878,17 @@ class MainWindow(QMainWindow):
 
         return holder
 
-    def make_kpi_card(self, title, value):
+    def make_kpi_card(self, title, value, caption=""):
+        """
+        A number with a label, and optionally a line saying what to do
+        about it.
+
+        The caption exists for counts that are zero for a reason the
+        number cannot express. "AI Explained 0" looks like a failure;
+        "0 — Review Queue > Explain Top Findings" is an instruction.
+        Cards without a caption are unchanged, and the label stays out
+        of the layout entirely rather than reserving blank space.
+        """
         card = QFrame()
         card.setObjectName("kpi_card")
 
@@ -891,12 +901,25 @@ class MainWindow(QMainWindow):
         value_label = QLabel(value)
         value_label.setObjectName("kpi_value")
 
+        caption_label = QLabel(caption)
+        caption_label.setObjectName("kpi_caption")
+        caption_label.setWordWrap(True)
+        caption_label.setVisible(bool(caption))
+
         layout.addWidget(title_label)
         layout.addWidget(value_label)
+        layout.addWidget(caption_label)
 
         card.value_label = value_label
+        card.caption_label = caption_label
 
         return card
+
+    @staticmethod
+    def set_kpi_caption(card, text):
+        """Set a card's caption, hiding the label when there is none."""
+        card.caption_label.setText(text)
+        card.caption_label.setVisible(bool(text))
 
     # ============================================================
     # NEW ASSESSMENT
@@ -1605,6 +1628,25 @@ class MainWindow(QMainWindow):
 
         self.show_local_ai_setup()
 
+    def explained_caption(self, explained: int) -> str:
+        """
+        Why the explained count is what it is, in one line.
+
+        A zero here has three quite different causes, and the number
+        alone cannot tell them apart: the feature is off, it is on but
+        nobody has run it, or it ran. Reading "0" as a broken AI is the
+        obvious wrong conclusion, so the card says which case it is and
+        where the control lives. Explanations never start on their own,
+        so "not run yet" is a normal state, not a fault.
+        """
+        if not self.ai_config.enabled:
+            return "Off - enable on New Assessment"
+        if explained:
+            return f"Top {explained} of the review queue"
+        if not self.review_queue:
+            return "Run an assessment first"
+        return "Review Queue > Explain Top Findings"
+
     def narration_blocker(self) -> str:
         """
         Why explanations cannot be started right now, or "" if they can.
@@ -1632,6 +1674,17 @@ class MainWindow(QMainWindow):
             f"Explain the top {self.ai_config.max_explanations} queued "
             f"findings using the local model. Runs on this machine; "
             f"takes a few minutes."))
+
+        # A greyed-out button with the reason hidden in a tooltip is a
+        # dead end: the reason is only found by hovering something that
+        # looks broken. Put it on screen instead. A finished run has
+        # already written its own outcome here and outranks this.
+        if self.narration_busy or self.narration_outcome is not None:
+            return
+        self.set_narration_status(blocker or (
+            f"Ready. Explains the top {self.ai_config.max_explanations} "
+            f"queued findings on this machine; the rest keep their rule "
+            f"rationale."))
 
     def announce_narration_available(self):
         """
@@ -3527,6 +3580,8 @@ class MainWindow(QMainWindow):
         # dashboard must not let it read as the whole assessment.
         self.kpi_explained.value_label.setText(
             f"{summary.explained} / {summary.total_findings:,}")
+        self.set_kpi_caption(self.kpi_explained, self.explained_caption(
+            summary.explained))
 
         assessed = (
             f"{summary.entities} entities assessed over "
@@ -4172,6 +4227,12 @@ class MainWindow(QMainWindow):
                 color: #f0f6fc;
                 font-size: 27px;
                 font-weight: 800;
+            }
+
+            #kpi_caption {
+                color: #8c9ab0;
+                font-size: 11px;
+                padding-top: 2px;
             }
 
             #drop_zone {

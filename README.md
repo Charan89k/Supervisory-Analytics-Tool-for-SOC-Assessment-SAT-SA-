@@ -14,7 +14,7 @@ one.
 
 It supports supervisory judgement. **It does not replace it.**
 
-> **v0.9.1** · 611 tests · 112 UI smoke checks · no network connection of any
+> **v0.9.1** · 626 tests · 112 UI smoke checks · no network connection of any
 > kind, at any point.
 
 <h3 align="center">
@@ -713,7 +713,7 @@ test coverage: [SECURITY.md](docs/SECURITY.md).
 ## Testing
 
 ```bash
-pytest                                              # 611 tests
+pytest                                              # 626 tests
 QT_QPA_PLATFORM=offscreen python tests/smoke_ui.py  # 112 UI checks
 python desktop.py --self-check                      # installation check
 ```
@@ -760,7 +760,7 @@ config/assessment_rules.yaml   every threshold, weight and mapping
 data/generator/                synthetic datasets with seeded ground truth
 packaging/                     PyInstaller spec, AI setup script, install docs
 schemas/                       assessment result schema
-tests/                         611 tests + the UI smoke test
+tests/                         626 tests + the UI smoke test
 docs/                          the documents linked below
 ```
 

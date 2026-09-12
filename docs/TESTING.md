@@ -13,7 +13,7 @@ multi-gigabyte model or depend on what is installed on the machine.
 
 | | |
 |---|---|
-| Test suite | **611 tests**, ~57s |
+| Test suite | **626 tests**, ~57s |
 | UI smoke test | **112 checks**, ~25s |
 | Model processes spawned | **0** |
 
@@ -21,8 +21,10 @@ multi-gigabyte model or depend on what is installed on the machine.
 |---|---:|---|
 | `test_detectors.py` | 48 | every rule: fires **and** does not fire |
 | `test_ingestion.py` | 43 | formats + adversarial archives |
+| `test_prompt_pipeline.py` | 39 | prompt construction, output validation |
 | `test_narration.py` | 30 | backends, scope, the never-alters invariant |
 | `test_dashboard.py` | 30 | dashboard computation, peer caveats |
+| `test_local_ai_setup.py` | 27 | runtime detection, consent, the setup plan |
 | `test_ai_integration.py` | 26 | disabled / unavailable / mock / cancellation |
 | `test_review_queue.py` | 24 | case correlation and prioritisation |
 | `test_ollama_runtime.py` | 24 | runtime discovery, all four AI states |
@@ -33,19 +35,20 @@ multi-gigabyte model or depend on what is installed on the machine.
 | `test_demo.py` | 21 | demonstration mode uses the real pipeline |
 | `test_validation_exposure.py` | 20 | validation in the GUI, and its boundary |
 | `test_capabilities.py` | 20 | rule → supervisory area mapping |
+| `test_app_settings.py` | 20 | settings persistence |
 | `test_trends.py` | 19 | trend arithmetic; no fabricated direction |
 | `test_pipeline.py` | 19 | end-to-end assessment |
 | `test_traceability.py` | 17 | finding → rule → evidence → source rows |
 | `test_completeness.py` | 17 | evidence completeness, and that it scores nothing |
 | `test_benchmarking.py` | 17 | peer groups, medians, small-group caveats |
-| `test_app_settings.py` | 16 | settings persistence |
+| `test_narration_visibility.py` | 15 | why there are no explanations, and why one failed |
 | `test_queue_coverage.py` | 13 | no CSE starved out of the review queue |
 | `test_low_activity_baseline.py` | 13 | sector-relative volume outliers |
 | `test_report_discovery.py` | 12 | single- and multi-period report artifacts |
 | `test_packaging.py` | 10 | frozen-build paths, self-check |
 | `test_missing_category_baseline.py` | 10 | sector-relative category coverage |
 | `test_trend_ground_truth.py` | 4 | seeded trajectories hold across periods |
-| **Total** | **541** | |
+| **Total** | **626** | |
 
 Plus `tests/smoke_ui.py` — **112 checks** driving the real `MainWindow`
 offscreen, from dataset load through assessment, findings, evidence
