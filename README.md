@@ -14,8 +14,34 @@ one.
 
 It supports supervisory judgement. **It does not replace it.**
 
-> **v0.9.1** · 541 tests · 112 UI smoke checks · no network connection of any
+> **v0.9.1** · 611 tests · 112 UI smoke checks · no network connection of any
 > kind, at any point.
+
+<h3 align="center">
+  <a href="https://github.com/Charan89k/Supervisory-Analytics-Tool-for-SOC-Assessment-SAT-SA-/releases/latest/download/SAT-SA-Windows.zip">
+    ⬇&nbsp; Download SAT-SA for Windows
+  </a>
+</h3>
+
+<p align="center">
+  <a href="https://github.com/Charan89k/Supervisory-Analytics-Tool-for-SOC-Assessment-SAT-SA-/releases">
+    <img alt="latest release"
+         src="https://img.shields.io/github/v/release/Charan89k/Supervisory-Analytics-Tool-for-SOC-Assessment-SAT-SA-?label=release&color=2f9e78">
+  </a>
+  <img alt="platform" src="https://img.shields.io/badge/Windows-10%20%7C%2011%20x64-4a90d9">
+  <img alt="Python not required" src="https://img.shields.io/badge/Python-not%20required-8c9ab0">
+</p>
+
+<p align="center"><sub>
+Extract the ZIP and run <code>SAT-SA\SAT-SA.exe</code> — no installer, no
+Python, no administrator rights, ~180&nbsp;MB extracted.<br>
+Keep the folder intact: this is a one-directory build and the executable does
+not start without <code>_internal\</code> beside it.
+</sub></p>
+
+> **No release is published yet, so that link will 404.** The badge above
+> reports the real state and corrects itself the moment one exists. Publishing
+> takes one command — see [Publishing a Windows release](#publishing-a-windows-release).
 
 ---
 
@@ -257,7 +283,45 @@ sudo pacman -S libxcb xcb-util-wm xcb-util-image xcb-util-keysyms \
 sudo apt install libxcb-xinerama0 libxkbcommon-x11-0 libegl1    # Debian/Ubuntu
 ```
 
-### Packaged Windows build
+### Windows — download and run
+
+**There is no downloadable Windows build yet.** The repository has tags
+`v0.9.0` and `v0.9.1`, but no GitHub Release with attached files — a tag marks
+source, not a distributable. To get a Windows build today you must produce one
+yourself on Windows: [packaging/BUILD.md](packaging/BUILD.md).
+
+Once a release is published, the route is:
+
+```
+GitHub  ->  Releases  ->  download SAT-SA-Windows.zip
+        ->  extract, keeping the folder intact
+        ->  run SAT-SA\SAT-SA.exe
+```
+
+No clone and no Python installation needed.
+
+**Download the whole folder, never just the .exe.** This is a one-directory
+PyInstaller build: `SAT-SA.exe` is 11 MB of a 179 MB application, and the rest
+lives in `_internal\` beside it.
+
+```
+SAT-SA/
+├── SAT-SA.exe            11 MB
+├── _internal/           168 MB   Python, Qt, plugins, rule configuration
+├── SAT-SA-Setup-AI.ps1   optional local AI setup
+├── INSTALL.txt
+└── README.txt
+```
+
+Run alone, the executable does not start — verified. With `_internal\` beside
+it, `--self-check` passes.
+
+> **Verification status.** The Windows build has been produced and exercised
+> **under Wine on Linux** — a genuine `PE32+` binary whose GUI launches and
+> whose self-check passes. It has **not** been run on real Windows. Defender
+> and SmartScreen behaviour, code signing, the PowerShell install path, DPI
+> scaling and a real end-to-end Local AI explanation are all unverified.
+> Native Windows testing is required before distribution.
 
 The build produces a **folder**, not an installer. No Python is required on the
 target machine, and SAT-SA itself needs no administrator rights.
@@ -285,6 +349,35 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\SAT-SA-Setup-AI.ps1
 
 The `.exe` must be built **on Windows**; PyInstaller does not cross-compile.
 See [packaging/BUILD.md](packaging/BUILD.md).
+
+### Publishing a Windows release
+
+The download button above resolves once a release carrying
+`SAT-SA-Windows.zip` exists. Nothing is committed to the repository — the
+179 MB build is git-ignored, and the ZIP lives only as a release asset.
+
+`.github/workflows/windows-release.yml` builds it **on a real Windows
+runner**, which matters: development builds are cross-compiled under Wine and
+cannot exercise a Windows kernel, Defender, or the PowerShell paths in the
+optional AI setup. The workflow runs the test suite, builds, stages the setup
+script and notes, runs `SAT-SA.exe --self-check` on the runner, checks no
+model or vendor installer ended up in the package, zips the folder, and
+attaches it.
+
+Pushing a version tag is the whole process:
+
+```bash
+git tag -a v0.9.2 -m "SAT-SA v0.9.2"
+git push origin v0.9.2
+```
+
+To produce a package without tagging — for a dry run — trigger **Windows
+package** from the Actions tab. The ZIP is attached to that run for 30 days
+as a downloadable artifact.
+
+Note that `v0.9.0` and `v0.9.1` are already tagged, so pushing them again will
+not trigger a build. Either tag a new version, or run the workflow manually
+against the existing tag with *Attach to release* enabled.
 
 ### Headless pipeline
 
@@ -485,6 +578,34 @@ service's own loopback API. Status is one of `AI DISABLED`, `AI NOT INSTALLED`,
 `SAMPLE EXPLANATIONS` or `AI READY` — each naming the single action that
 resolves it.
 
+### Setting it up
+
+SAT-SA can install the local AI for you, and never does so without being
+asked. On startup it checks what is present and offers the one action that
+would fix what is not — reachable at any time from **Help → Set up Local AI…**
+
+| What it finds | What it offers |
+|---|---|
+| No runtime | **Install Local AI** |
+| Installed, service stopped | **Start Ollama** |
+| Running, model absent | **Install Qwen 2.5 3B** |
+| Both present | nothing — it works |
+
+**Continue Without AI** is always available, and choosing it changes nothing
+about an assessment.
+
+The dialog says what an action will do before it runs. Starting a stopped
+service touches no network; installing the runtime or the model downloads from
+the internet and says so. On Windows this delegates to the reviewed
+`SAT-SA-Setup-AI.ps1` with a process-scoped execution-policy bypass — no
+machine policy is changed, no firewall rule added, no remote script fetched
+and run. On Linux and macOS SAT-SA prints the install command for you to run
+yourself rather than piping a downloaded script into a shell.
+
+**The Qwen model is not bundled in the executable.** It is downloaded once,
+locally, into Ollama's own store. Once installed, inference is entirely local:
+no assessment data reaches any external service, before or after setup.
+
 Model choices are `qwen2.5:3b` (Fast), `qwen2.5:7b` (Balanced, default) and
 `qwen2.5:14b` (Deep). 14B needs roughly 9 GB resident and is never the default.
 
@@ -590,7 +711,7 @@ test coverage: [SECURITY.md](docs/SECURITY.md).
 ## Testing
 
 ```bash
-pytest                                              # 541 tests
+pytest                                              # 611 tests
 QT_QPA_PLATFORM=offscreen python tests/smoke_ui.py  # 112 UI checks
 python desktop.py --self-check                      # installation check
 ```
@@ -637,7 +758,7 @@ config/assessment_rules.yaml   every threshold, weight and mapping
 data/generator/                synthetic datasets with seeded ground truth
 packaging/                     PyInstaller spec, AI setup script, install docs
 schemas/                       assessment result schema
-tests/                         541 tests + the UI smoke test
+tests/                         611 tests + the UI smoke test
 docs/                          the documents linked below
 ```
 

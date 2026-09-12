@@ -194,6 +194,111 @@ page, status tile, self-check report — gives the same instruction.
 **AI is off by default.** A fresh install produces a complete assessment
 with no model present and no configuration.
 
+## First-run setup
+
+SAT-SA can install the optional local AI for you. Nothing happens
+without being asked.
+
+### The four states
+
+`application/services/local_ai_setup.py` classifies what
+`ollama_runtime.discover()` found into the four states a setup flow has
+to act on. Each carries exactly one action, because each needs a
+different thing from the user.
+
+| State | What is true | Action offered |
+|---|---|---|
+| `NOT_INSTALLED` | no runtime found at all | **Install Local AI** |
+| `SERVICE_STOPPED` | installed, service not responding | **Start Ollama** |
+| `MODEL_MISSING` | service healthy, model absent | **Install Qwen 2.5 3B** |
+| `READY` | runtime up, model present | none — it works |
+
+These map onto the `BackendStatus` states the rest of the application
+already reports (`STATE_NOT_INSTALLED`, `STATE_NOT_RUNNING`,
+`STATE_MODEL_MISSING`, `STATE_AVAILABLE`). Detection is **not**
+reimplemented: `inspect()` classifies `discover()`'s answer and nothing
+more.
+
+`inspect()` is read-only. It runs at startup, so it must not install,
+download or start anything as a side effect of looking — a test asserts
+it cannot spawn a subprocess.
+
+### The flow
+
+```
+   detect Ollama
+        │
+        ├── not installed ──► [Install Local AI]  ─┐
+        │                                          │
+        ├── service stopped ─► [Start Ollama] ─────┤
+        │                                          │
+        ├── model missing ───► [Install Qwen] ─────┤
+        │                                          │
+        └── ready ───────────────────────────────► LOCAL AI READY
+                                                   │
+   at every branch: [Continue Without AI] ─────────┘
+```
+
+The dialog is reachable at any time from **Help → Set up Local AI…**,
+not only on a first run: someone who dismissed it, or who stopped
+Ollama later, needs a way back.
+
+### The model
+
+`qwen2.5:3b` — deliberately the small one. 3B answers in tens of
+seconds on a CPU-only laptop where 7B takes minutes, and a setup flow
+that leaves someone with a model too slow to use has not helped them.
+
+After a successful install SAT-SA points itself at the model that was
+actually installed. Without that, a working setup would immediately
+report `AI MODEL MISSING`, because the shipped configuration default is
+the balanced 7B — which reads as a broken install rather than a
+mismatched setting.
+
+Any tag Ollama can resolve works; the configured model lives in
+`llm_narration.model` and the Settings page offers 3B, 7B and 14B.
+
+### Consent, and what reaches the internet
+
+The dialog states what an action will do **before** it runs, and the
+wording differs by whether it reaches the network:
+
+| Action | Network |
+|---|---|
+| Start a stopped service | **no** — nothing is downloaded |
+| Install the runtime | **yes** — downloads Ollama |
+| Install the model | **yes** — downloads roughly 2 GB |
+
+On Windows, installation delegates to the reviewed
+`SAT-SA-Setup-AI.ps1` with `-Model qwen2.5:3b -AllowDownload` and a
+**process-scoped** `-ExecutionPolicy Bypass` that expires with the
+process. The machine policy is never touched, no firewall rule is added
+and no remote script is fetched and executed.
+
+On Linux and macOS, SAT-SA does **not** install the runtime. The usual
+one-line install for those platforms pipes a downloaded script straight
+into a shell, which is not something a supervisory tool should do on
+someone's behalf. The dialog prints the command instead and the user
+runs it themselves. Pulling a model works normally on every platform,
+since that is Ollama's own client talking to Ollama's own registry.
+
+### When setup fails
+
+Never fatally. Every action returns a result rather than raising, the
+startup offer swallows exceptions outright, and a failure shows the
+real reason alongside the statement that assessment functionality is
+unaffected, with **Retry** and **Continue Without AI**.
+
+Success is judged by re-querying the runtime, not by an exit code: a
+pull that returns zero without producing a model is caught, instead of
+leaving the application reporting ready and then failing on the first
+explanation.
+
+Installing and pulling run in a worker thread with the buttons
+disabled. Cancellation is honoured between steps rather than killing a
+download mid-write, because a half-written model is worse than a slow
+one.
+
 ## Backends
 
 ```

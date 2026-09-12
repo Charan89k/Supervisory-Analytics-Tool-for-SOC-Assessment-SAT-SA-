@@ -26,6 +26,30 @@ machine.)
 
 This check is run at the end of every development phase.
 
+## Two things, kept separate
+
+The distinction that matters for an air-gapped deployment:
+
+| | Internet to prepare | Internet to run |
+|---|---|---|
+| **SAT-SA core** — ingestion, validation, detection, evidence, scoring, benchmarking, review queue, reports | **no** | **no** |
+| **Optional local AI — inference** | — | **no**, once installed |
+| **Optional local AI — first-time installation** of Ollama or a model | **yes**, unless the files are supplied on the media | no |
+
+The assessment engine never needs a network. The only step that can is
+*obtaining* the runtime and the model in the first place, and that step
+is optional, explicitly consented to, and one-time.
+
+SAT-SA does not download anything on its own. The in-application setup
+dialog states before it acts whether the action reaches the network —
+starting an already-installed service does not; fetching a runtime or a
+model does — and `SAT-SA-Setup-AI.ps1` contacts nothing unless passed
+`-AllowDownload`.
+
+For a machine that will never have a network, supply the files on the
+media instead: see the `ai\` folder in `packaging/BUILD.md`, or use the
+llama.cpp path below, where the model is a data file you copy.
+
 ## Verifying it yourself
 
 ```bash

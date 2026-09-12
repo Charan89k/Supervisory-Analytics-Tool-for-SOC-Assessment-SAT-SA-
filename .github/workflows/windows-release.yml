@@ -1,0 +1,143 @@
+name: Windows package
+
+# Builds the Windows distribution on a REAL Windows runner.
+#
+# This is the point of the workflow. Development builds are produced by
+# cross-compiling under Wine on Linux, which yields a genuine PE32+ but
+# cannot exercise a Windows kernel, Defender, or the PowerShell paths in
+# the optional AI setup. A windows-latest runner can, so what is
+# attached to a release has actually run on Windows.
+#
+# The Qwen model and the Ollama runtime are NOT packaged. The archive
+# holds SAT-SA only; the optional local AI is obtained separately, on
+# request, by the person running it.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      attach_to_release:
+        description: 'Also attach the ZIP to the release for this tag'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write        # required only to attach the asset to a release
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.12 because every dependency publishes a cp312 win_amd64 wheel.
+      # PySide6 ships an abi3 wheel spanning 3.10-3.14; pandas does not.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-desktop.txt
+          python -m pip install pyinstaller
+
+      # The gate. A package is not built from a failing tree.
+      - name: Run the test suite
+        run: python -m pytest -q
+
+      - name: Build
+        run: python -m PyInstaller packaging/SAT-SA.spec --noconfirm
+
+      - name: Stage the setup script and notes beside the executable
+        shell: pwsh
+        run: |
+          foreach ($f in 'SAT-SA-Setup-AI.ps1','INSTALL.txt','README.txt') {
+            $src = Join-Path 'packaging' $f
+            if (Test-Path $src) {
+              Copy-Item $src -Destination 'dist/SAT-SA/' -Force
+              Write-Host "staged $f"
+            } else {
+              Write-Warning "missing, not staged: $f"
+            }
+          }
+
+      # Verifying on the runner is most of the value here: this is the
+      # first time the binary runs on a real Windows kernel.
+      - name: Self-check the packaged application
+        run: ./dist/SAT-SA/SAT-SA.exe --self-check
+
+      - name: Confirm the package is complete and carries no model
+        shell: pwsh
+        run: |
+          $root = 'dist/SAT-SA'
+          if (-not (Test-Path "$root/SAT-SA.exe"))  { throw 'SAT-SA.exe is missing' }
+          if (-not (Test-Path "$root/_internal"))   { throw '_internal is missing — the app will not start' }
+
+          # A model or a vendor installer in the package means something
+          # went wrong: neither belongs in the executable.
+          $forbidden = Get-ChildItem $root -Recurse -Include *.gguf,*.safetensors,OllamaSetup.exe
+          if ($forbidden) { throw "model or runtime files found in the package: $($forbidden.Name)" }
+
+          $mb = [math]::Round((Get-ChildItem $root -Recurse | Measure-Object Length -Sum).Sum / 1MB)
+          Write-Host "package size: $mb MB"
+          if ($mb -gt 600) { throw "package is $mb MB — far larger than expected, check the spec excludes" }
+
+      - name: Create the ZIP
+        shell: pwsh
+        run: |
+          # Compress the FOLDER, not its contents: this is a onedir build
+          # and SAT-SA.exe does not run without _internal beside it.
+          Compress-Archive -Path 'dist/SAT-SA' -DestinationPath 'SAT-SA-Windows.zip' -Force
+          $mb = [math]::Round((Get-Item 'SAT-SA-Windows.zip').Length / 1MB)
+          Write-Host "SAT-SA-Windows.zip: $mb MB"
+
+      # Always available from the run page, tag or not.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SAT-SA-Windows
+          path: SAT-SA-Windows.zip
+          retention-days: 30
+
+      # Only on a tag, so the stable /releases/latest/download/ URL in
+      # the README resolves once a version is tagged.
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.attach_to_release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SAT-SA-Windows.zip
+          fail_on_unmatched_files: true
+          body: |
+            ## SAT-SA — Windows package
+
+            Download **SAT-SA-Windows.zip**, extract it, and run
+            `SAT-SA\SAT-SA.exe`.
+
+            Keep the folder intact. This is a one-directory build:
+            `SAT-SA.exe` does not start without the `_internal\` folder
+            beside it.
+
+            ### Optional local AI
+
+            The Qwen model and the Ollama runtime are **not** in this
+            archive, which is why it is ~180 MB rather than several
+            gigabytes. SAT-SA's assessment works fully without them —
+            same findings, same evidence, same scores, same reports.
+
+            To enable plain-language explanations, use
+            **Help → Set up Local AI…** inside the application. It asks
+            before downloading anything, and once installed all
+            inference is local: no assessment data leaves the machine.
+
+            ### Requirements
+
+            Windows 10/11 64-bit · ~180 MB extracted · no Python needed
+            · no administrator rights needed for SAT-SA itself.
+
+            Built and self-checked on a GitHub `windows-latest` runner.
+            The binary is unsigned, so Windows SmartScreen may warn on
+            first launch.

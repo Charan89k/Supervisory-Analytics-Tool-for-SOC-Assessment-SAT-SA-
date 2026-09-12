@@ -55,10 +55,18 @@ hiddenimports = [
     "analytics.narration.mock",
     "analytics.narration.ollama_backend",
     "analytics.narration.ollama_runtime",
-    # base.build_prompt imports this INSIDE the function, so static
-    # analysis does not always follow it. Missing it would break
-    # explanations in the packaged build only, which is the worst place
-    # to discover it.
+    # base.build_prompt imports this INSIDE a function. Verified
+    # redundant with PyInstaller 6.22.2, which walks bytecode and finds
+    # function-level imports on its own — a build with this line removed
+    # still contains the module. Kept as belt-and-braces because losing
+    # it would break explanations in the packaged build ONLY, which is
+    # the worst place to discover anything.
+    #
+    # The Local AI setup modules are imported the same way from
+    # application/ui.py and are deliberately NOT listed: the same test
+    # showed them present without a hint, and a hidden import that is
+    # not needed is a claim about the import graph that later stops
+    # being true without anyone noticing.
     "analytics.narration.prompt",
     # Reported beside the risk score; imported by main, not by a backend.
     "analytics.completeness",

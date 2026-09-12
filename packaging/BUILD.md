@@ -89,6 +89,57 @@ If you add a dependency, re-run `--self-check` on the frozen build
 before shipping. It is the cheapest way to catch a hidden import that
 PyInstaller's static analysis could not follow.
 
+## The Local AI setup flow, and what the package contains
+
+The application can install Ollama and `qwen2.5:3b` for the user, on
+request. **Neither is inside the executable.**
+
+| | In the EXE | How it arrives |
+|---|---|---|
+| SAT-SA | yes | the package |
+| Ollama runtime | **no** | the setup flow, or the user, or `ai\` on the media |
+| Qwen model | **no** | the same, into Ollama's own store |
+
+Bundling either would put a multi-gigabyte third-party runtime and model
+inside a supervisory tool, take the package from ~180 MB to several
+gigabytes, and make an optional convenience compulsory. The setup flow
+exists precisely so the executable does not have to carry them.
+
+The dialog delegates Windows installation to `SAT-SA-Setup-AI.ps1`, so
+that script must be staged beside the executable — the build script
+does this. Without it the dialog reports the script as missing and
+points the user at ollama.com rather than failing silently.
+
+### Hidden imports for the Local AI modules: not required
+
+`application/ui.py` imports `application.widgets.local_ai_dialog` and
+`application.services.local_ai_setup` **inside functions**, which looks
+like the pattern that needs a hidden import. It was tested rather than
+assumed: a build with no hints for either module contains both.
+PyInstaller 6.22.2 walks bytecode and follows function-level imports on
+its own.
+
+The same test showed `analytics.narration.prompt` is also found without
+its hint. That entry is kept as belt-and-braces, because losing it would
+break explanations in the packaged build only. The Local AI modules are
+deliberately *not* listed: a hidden import that is not needed is a claim
+about the import graph that can quietly stop being true.
+
+Re-run the check after adding a module that is only reached dynamically:
+
+```bash
+python - <<'PY'
+from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
+a = CArchiveReader('dist/SAT-SA/SAT-SA.exe')      # or dist-windows/...
+name = next(n for n in a.toc if str(n).endswith('.pyz'))
+d = a.extract(name); open('/tmp/p.pyz','wb').write(d if isinstance(d, bytes) else d[1])
+z = ZlibArchiveReader('/tmp/p.pyz')
+for m in ("application.widgets.local_ai_dialog",
+          "application.services.local_ai_setup"):
+    print(m, "PRESENT" if m in z.toc else "MISSING")
+PY
+```
+
 ## What must never be bundled
 
 Model weights in the executable, real SOC data, credentials, or any

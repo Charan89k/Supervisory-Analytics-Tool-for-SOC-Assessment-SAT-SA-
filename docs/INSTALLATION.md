@@ -100,6 +100,134 @@ python main.py --data data/synthetic --out outputs --export-csv --export-pdf
 
 ## 3. Packaged Windows build
 
+### What to download
+
+SAT-SA is a **one-directory** PyInstaller build. `SAT-SA.exe` is 11 MB of a
+179 MB application — the other 168 MB is the `_internal\` folder beside it,
+holding Python, Qt, the Qt platform plugins and the rule configuration.
+
+```
+SAT-SA-Windows.zip
+└── SAT-SA/
+    ├── SAT-SA.exe            11 MB   the launcher
+    └── _internal/           168 MB   Python, Qt, plugins, config  (889 files)
+```
+
+**Download the whole folder, not just the .exe.** Copying `SAT-SA.exe` on its
+own produces an application that does not start — verified: run alone it hangs
+with no output; with `_internal\` beside it, `--self-check` passes all five
+checks. The executable locates everything relative to its own directory.
+
+If the package also ships the optional AI installer and the notes, they sit
+beside the executable:
+
+```
+SAT-SA/
+├── SAT-SA.exe
+├── _internal/
+├── SAT-SA-Setup-AI.ps1       optional local AI setup
+├── INSTALL.txt
+└── README.txt
+```
+
+Keep the folder intact. Extract it somewhere writable and run the `.exe` from
+inside it.
+
+### Where to get it
+
+**There is currently no GitHub Release, and no downloadable Windows build.**
+The repository has tags `v0.9.0` and `v0.9.1`, but a tag is a source marker,
+not a release with attached files — the releases list is empty.
+
+Today the only way to obtain a Windows build is to produce one yourself, on
+Windows, following [../packaging/BUILD.md](../packaging/BUILD.md).
+
+The intended distribution route, once a release is published:
+
+```
+GitHub repository  ->  Releases  ->  the SAT-SA Windows release
+                   ->  download SAT-SA-Windows.zip
+                   ->  extract, keeping the folder intact
+                   ->  run SAT-SA\SAT-SA.exe
+```
+
+With that in place a judge or evaluator would not need to clone the repository
+or install Python at all. Until it is, they do.
+
+### First run
+
+```
+SAT-SA.exe
+   │
+   ▼
+SAT-SA starts and is immediately usable
+   │
+   ▼
+It checks for Ollama and qwen2.5:3b
+   │
+   ├── both present ──────────►  LOCAL AI READY
+   │
+   └── something missing ─────►  optional setup offered
+                                    ├── [Install Local AI]  (asks first)
+                                    └── [Continue Without AI]
+```
+
+The check is a filesystem lookup and one loopback request. It does not block
+startup, and nothing is installed or downloaded by it.
+
+**Neither Ollama nor the Qwen model is inside the executable.** They are
+separate software obtained once, on request. That is why the package is
+~180 MB rather than several gigabytes.
+
+- SAT-SA's assessment works fully without Ollama.
+- It works fully without Qwen.
+- Local AI is optional, and **Continue Without AI** changes nothing about an
+  assessment: same findings, same evidence, same severities, same ranking,
+  same reports.
+- Installing Ollama or the model **requires internet, once**.
+- After installation, inference is entirely local. No assessment data reaches
+  any external service, before or after.
+
+### Requirements
+
+| | |
+|---|---|
+| OS | Windows 10 or 11, 64-bit (the build targets x86-64) |
+| Disk | ~180 MB extracted, plus ~2 GB if you install the Qwen 3B model |
+| RAM | 4 GB for the assessment; ~4 GB more while the 3B model is loaded |
+| Python | **not required** — it is inside the package |
+| Administrator | **not required** for SAT-SA; the Ollama installer may ask |
+| Internet | only to install Ollama or download a model |
+| GPU | not required. SAT-SA's analytics are CPU-only and use no GPU at all. Ollama will use a supported GPU if present, which affects only how fast explanations generate |
+
+Figures for the assessment engine are measured on an 8th-generation Intel Core
+i5 U-series laptop; the model figures are Ollama's own requirements and are not
+something this project has benchmarked on Windows.
+
+### Verification status — read this before distributing
+
+**The Windows executable has been built and exercised under Wine on Linux. It
+has not been run on a real Windows machine.**
+
+Established under Wine: the binary is a genuine `PE32+ x86-64`, the GUI
+launches and renders the dashboard, `--self-check` passes all five checks
+reporting `platform: Windows 10 (AMD64)` with Windows paths resolved, and the
+full assessment produces output identical to Linux.
+
+**Not** established, and still needing a real Windows machine:
+
+- launching from Explorer, and Windows Defender / SmartScreen behaviour
+- code signing (the build is unsigned)
+- the Local AI setup flow's PowerShell installation path — Wine does not
+  exercise the vendor installer meaningfully
+- installing Ollama, pulling Qwen, and a real explanation end to end
+- report generation and file permissions under a real user profile
+- DPI scaling and multi-monitor behaviour
+
+Wine verification is a development aid. It is not native Windows validation,
+and this package should be tested on Windows before it is given to anyone.
+
+
 The build is a **folder**, not an installer. Nothing is written to the
 registry, no Python is required, and SAT-SA itself needs no administrator
 rights.
@@ -203,10 +331,52 @@ supported configurations:
 | **B. Ollama** | background service, loopback port | `SAT-SA-Setup-AI.ps1` | easiest; nothing to configure |
 | **C. llama.cpp** | in-process, no service | copy a `.gguf` file | a resident daemon is not permitted |
 
-### B. Ollama (default, zero configuration)
+### Two paths through Windows installation
 
-Run the setup script once. It is idempotent — run it twice and the second run
-reports what is already in place and changes nothing.
+**Path A — without Local AI.** Extract, launch, choose *Continue Without AI*,
+assess. Every finding, score, evidence record and report is produced without a
+model. Nothing further is needed and nothing is downloaded.
+
+```
+Extract  ->  SAT-SA.exe  ->  [Continue Without AI]  ->  run an assessment
+```
+
+**Path B — with Local AI.** The same, then let SAT-SA set the model up.
+
+```
+Extract  ->  SAT-SA.exe  ->  SAT-SA checks Ollama and qwen2.5:3b
+                              │
+                              ├─ both present  ->  LOCAL AI READY
+                              │
+                              └─ something missing
+                                     ->  [Install Local AI]   (asks first)
+                                     ->  downloads and verifies
+                                     ->  LOCAL AI READY
+```
+
+You do not have to type a PowerShell command. SAT-SA invokes the reviewed
+`SAT-SA-Setup-AI.ps1` that ships beside the executable, passing
+`-Model qwen2.5:3b -AllowDownload` and a process-scoped execution-policy
+bypass that expires with the process. The machine-wide policy is not changed.
+
+The dialog tells you what will happen before it happens:
+
+- **Start Ollama** touches no network.
+- **Install Local AI** and **Install Qwen 2.5 3B** download from the internet,
+  and the dialog says so, along with the fact that your assessment data stays
+  on the machine.
+
+If setup fails you get the real reason, plus **Retry** and **Continue Without
+AI**. SAT-SA itself is unaffected either way — a failed AI setup has never
+stopped an assessment.
+
+The dialog is also available later from **Help → Set up Local AI…**
+
+### Doing it yourself instead
+
+If you would rather not have SAT-SA run anything, the setup script is a plain
+file you can read and run directly. It is idempotent — run it twice and the
+second run reports what is already in place and changes nothing.
 
 ```powershell
 .\SAT-SA-Setup-AI.ps1                        # offline, from the bundled ai\ folder
@@ -323,7 +493,7 @@ All optional. SAT-SA works with none of them set.
 ## 6. Verifying the installation
 
 ```bash
-pytest                                              # 541 tests
+pytest                                              # 611 tests
 QT_QPA_PLATFORM=offscreen python tests/smoke_ui.py  # 112 UI checks
 python desktop.py --self-check                      # installation check
 ```

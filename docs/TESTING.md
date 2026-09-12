@@ -13,7 +13,7 @@ multi-gigabyte model or depend on what is installed on the machine.
 
 | | |
 |---|---|
-| Test suite | **541 tests**, ~50s |
+| Test suite | **611 tests**, ~57s |
 | UI smoke test | **112 checks**, ~25s |
 | Model processes spawned | **0** |
 

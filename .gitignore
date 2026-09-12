@@ -42,3 +42,7 @@ self-check.txt
 build-windows/
 dist-windows/
 outputs-win/
+
+# The Windows distributable. Built in CI and attached to a GitHub
+# release; it is never a file in the repository. ~76 MB zipped.
+SAT-SA-Windows.zip
