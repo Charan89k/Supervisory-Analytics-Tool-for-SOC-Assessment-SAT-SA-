@@ -16,12 +16,12 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual runs produce the ZIP as a run artifact for a dry run. They
+  # deliberately take no "also publish" input: this action derives the
+  # tag from github.ref, so a manual run from a branch has no tag to
+  # attach to and would either fail or create a release named after the
+  # branch. Publishing is what tagging is for.
   workflow_dispatch:
-    inputs:
-      attach_to_release:
-        description: 'Also attach the ZIP to the release for this tag'
-        type: boolean
-        default: false
 
 permissions:
   contents: write        # required only to attach the asset to a release
@@ -103,10 +103,10 @@ jobs:
           path: SAT-SA-Windows.zip
           retention-days: 30
 
-      # Only on a tag, so the stable /releases/latest/download/ URL in
-      # the README resolves once a version is tagged.
+      # Tag pushes only, so the stable /releases/latest/download/ URL in
+      # the README resolves. A manual run stops at the artifact above.
       - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.attach_to_release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: SAT-SA-Windows.zip

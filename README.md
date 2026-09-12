@@ -34,14 +34,14 @@ It supports supervisory judgement. **It does not replace it.**
 
 <p align="center"><sub>
 Extract the ZIP and run <code>SAT-SA\SAT-SA.exe</code> — no installer, no
-Python, no administrator rights, ~180&nbsp;MB extracted.<br>
+Python, no administrator rights &mdash; 76&nbsp;MB zipped, 179&nbsp;MB extracted.<br>
 Keep the folder intact: this is a one-directory build and the executable does
 not start without <code>_internal\</code> beside it.
 </sub></p>
 
-> **No release is published yet, so that link will 404.** The badge above
-> reports the real state and corrects itself the moment one exists. Publishing
-> takes one command — see [Publishing a Windows release](#publishing-a-windows-release).
+> The badge above reports the real release state and updates itself. If it
+> reads *no releases*, the download link will 404 — publishing takes one
+> command, see [Publishing a Windows release](#publishing-a-windows-release).
 
 ---
 
@@ -285,10 +285,11 @@ sudo apt install libxcb-xinerama0 libxkbcommon-x11-0 libegl1    # Debian/Ubuntu
 
 ### Windows — download and run
 
-**There is no downloadable Windows build yet.** The repository has tags
-`v0.9.0` and `v0.9.1`, but no GitHub Release with attached files — a tag marks
-source, not a distributable. To get a Windows build today you must produce one
-yourself on Windows: [packaging/BUILD.md](packaging/BUILD.md).
+Windows builds are distributed as GitHub Release assets, produced by a
+workflow that builds on a `windows-latest` runner. **No release has been
+published yet**, so the badge above reads *no releases* and the download link
+404s until one is. Until then, build one yourself on Windows:
+[packaging/BUILD.md](packaging/BUILD.md).
 
 Once a release is published, the route is:
 
@@ -375,9 +376,10 @@ To produce a package without tagging — for a dry run — trigger **Windows
 package** from the Actions tab. The ZIP is attached to that run for 30 days
 as a downloadable artifact.
 
-Note that `v0.9.0` and `v0.9.1` are already tagged, so pushing them again will
-not trigger a build. Either tag a new version, or run the workflow manually
-against the existing tag with *Attach to release* enabled.
+A manual run stops at the artifact and publishes nothing — the release step
+derives its tag from the pushed ref, so tagging is what publishes. Note that
+`v0.9.0` and `v0.9.1` are already tagged and pushing them again triggers
+nothing; publishing needs a new version.
 
 ### Headless pipeline
 

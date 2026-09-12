@@ -135,14 +135,16 @@ inside it.
 
 ### Where to get it
 
-**There is currently no GitHub Release, and no downloadable Windows build.**
-The repository has tags `v0.9.0` and `v0.9.1`, but a tag is a source marker,
-not a release with attached files — the releases list is empty.
+Windows builds are published as GitHub Release assets, built by
+`.github/workflows/windows-release.yml` on a real `windows-latest` runner that
+runs the test suite and `--self-check` on the binary before attaching it. A tag
+is a source marker; the release is what carries the download. No release has
+been published yet, so this route is not yet live.
 
-Today the only way to obtain a Windows build is to produce one yourself, on
-Windows, following [../packaging/BUILD.md](../packaging/BUILD.md).
+If no release has been published for the version you want, build one yourself
+on Windows following [../packaging/BUILD.md](../packaging/BUILD.md).
 
-The intended distribution route, once a release is published:
+The distribution route:
 
 ```
 GitHub repository  ->  Releases  ->  the SAT-SA Windows release
@@ -308,13 +310,14 @@ build — a folder that cannot pass its own self-check is a failed build, not a
 shippable one. It then stages `SAT-SA-Setup-AI.ps1`, `INSTALL.txt` and
 `README.txt` beside the executable.
 
-Output is `dist\SAT-SA\` — a folder, roughly 320 MB. Zip that for
-distribution.
+Output is `dist\SAT-SA\` — a folder, 179 MB. Zipped for distribution it is
+76 MB; the CI workflow zips it for you.
 
-**Not yet done:** as of v0.9.1 the Windows executable has not been built or
-tested. The spec and this script are complete, and a Linux build from the same
-spec passes `--self-check`, which proves the import graph and bundled resources
-are correct — but that is not the same as a verified Windows binary. See
+**Verification status as of v0.9.1.** A Windows PE32+ build has been produced
+from this spec and passes `SAT-SA.exe --self-check`, but under Wine, not on
+Windows — that exercises the import graph, bundled resources and Qt plugin
+loading, and is not the same as a native run. The CI workflow that builds on a
+real `windows-latest` runner is committed but has not yet been executed. See
 [../packaging/BUILD.md](../packaging/BUILD.md).
 
 ---

@@ -68,9 +68,10 @@ they belong on the distribution media, not in the repository.
 
 ## Size
 
-Roughly 320 MB unpacked, most of it Qt and the scientific Python
-stack. The spec excludes what is genuinely unused, and each exclusion
-was verified rather than assumed:
+179 MB unpacked, 76 MB zipped — measured on a build from this spec,
+most of it Qt and the scientific Python stack. The spec excludes what
+is genuinely unused, and each exclusion was verified rather than
+assumed:
 
 - **`pyarrow` (149 MB) is excluded.** pandas 3.x imports it
   opportunistically and does not need it for anything SAT-SA does. The
