@@ -394,6 +394,12 @@ class MainWindow(QMainWindow):
         action_system.triggered.connect(self.show_system_information)
         help_menu.addAction(action_system)
 
+        help_menu.addSeparator()
+
+        action_local_ai = QAction("Set up &Local AI…", self)
+        action_local_ai.triggered.connect(self.show_local_ai_setup)
+        help_menu.addAction(action_local_ai)
+
     def build_status_bar(self):
         """
         Persistent context that no single page owns: which dataset is
@@ -1528,6 +1534,76 @@ class MainWindow(QMainWindow):
         self.update_narration_controls()
 
         return status
+
+    def show_local_ai_setup(self):
+        """
+        Open the optional local-AI setup dialog.
+
+        Always available from Help, not only on a first run: someone who
+        dismissed it, or who stopped Ollama later, needs a way back.
+        """
+        if not self.interactive:
+            self.notify("info", "Local AI Setup",
+                        "Setup dialog suppressed in non-interactive mode.")
+            return
+
+        from application.widgets.local_ai_dialog import LocalAISetupDialog
+
+        dialog = LocalAISetupDialog(self)
+        dialog.exec()
+
+        # Whatever happened, re-probe. The dialog may have installed a
+        # runtime, started a service, or nothing at all.
+        if dialog.local_ai_ready():
+            self._adopt_installed_model()
+        self.refresh_ai_status()
+
+    def _adopt_installed_model(self):
+        """
+        Point the application at the model setup actually installed.
+
+        Setup installs the small model; the shipped default is the
+        balanced one. Leaving the two disagreeing would report
+        AI MODEL MISSING immediately after a successful install, which
+        reads as a broken setup rather than a mismatched setting.
+        """
+        from application.services import local_ai_setup
+        from application.services.ai_config import MODELS
+
+        if self.ai_config.model == local_ai_setup.SETUP_MODEL:
+            return
+
+        mode = next((key for key, name in MODELS.items()
+                     if name == local_ai_setup.SETUP_MODEL), self.ai_config.mode)
+        self.ai_config.model = local_ai_setup.SETUP_MODEL
+        self.ai_config.mode = mode
+        self.ai_config.enabled = True
+        self.settings_service.save_ai_config(self.ai_config)
+        self.settings_page.load_from(self.ai_config)
+
+    def offer_local_ai_setup(self):
+        """
+        Offer setup once, at startup, when the local AI is not usable.
+
+        Deliberately an offer and not a gate: it is skipped entirely
+        when the AI is already working, when the user has switched AI
+        off, and in non-interactive mode. SAT-SA has already started and
+        is fully usable by the time this appears.
+        """
+        if not self.interactive or not self.ai_config.enabled:
+            return
+
+        from application.services import local_ai_setup
+
+        try:
+            state = local_ai_setup.inspect()
+        except Exception:
+            return          # setup is optional; never block startup
+
+        if state.ready:
+            return
+
+        self.show_local_ai_setup()
 
     def narration_blocker(self) -> str:
         """
