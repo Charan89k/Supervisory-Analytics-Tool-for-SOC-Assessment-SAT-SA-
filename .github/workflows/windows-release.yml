@@ -44,7 +44,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-desktop.txt
-          python -m pip install pyinstaller
+          # pytest and pyinstaller are CI-only: the test gate needs the
+          # first and the build step the second, but neither belongs in
+          # the shipped application's runtime dependencies, so neither
+          # is in requirements.txt. Installing them here rather than via
+          # requirements-dev.txt also keeps streamlit and plotly out —
+          # those exist only for the legacy app.py, which no test imports.
+          python -m pip install pytest pyinstaller
 
       # The gate. A package is not built from a failing tree.
       - name: Run the test suite
