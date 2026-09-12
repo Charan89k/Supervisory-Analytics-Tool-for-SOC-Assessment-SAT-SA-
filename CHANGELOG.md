@@ -3,6 +3,50 @@
 All notable changes to SAT-SA. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.3] — 2026-09-12
+
+The first version published as a downloadable Windows build. No change
+to the deterministic engine, the human-in-the-loop boundary, the AI
+constraints, evidence provenance or the offline architecture.
+
+### Local AI explanations
+
+- **A zero explained count now says why.** "AI Explained 0 / 1,481" has
+  three quite different causes — the feature is off, it is on but
+  nobody has started it, or it ran and failed — and the number alone
+  distinguished none of them. On a machine whose Settings page reported
+  the model as working, this was indistinguishable from a broken AI.
+  The dashboard tile now names the case and where the control lives;
+  the Explain button is on the Review Queue, not the dashboard, so the
+  caption names both.
+- **The disabled reason is on screen, not in a tooltip.** It could
+  previously only be found by hovering something that looks broken.
+- **Timeouts no longer fail silently.** The Ollama backend caught every
+  exception and returned nothing, so a model too slow for the timeout
+  produced "0 explained; 1 failed" with no cause. Measured on a
+  CPU-only machine, `qwen2.5:14b` exceeds the 180s timeout while
+  `qwen2.5:3b` answers in 108s. The reason and the way out now reach
+  the supervisor. A failed explanation still keeps its rule rationale.
+
+### Packaging
+
+- **Windows CI could never have passed.** The workflow installed the
+  runtime dependencies and PyInstaller, then ran `python -m pytest`;
+  pytest is deliberately not a runtime dependency, so the gate failed
+  with "No module named pytest" before running a single test.
+- **The release workflow took an input that could not work.** Its
+  `attach_to_release` dispatch input had no tag to attach to, because
+  the action derives the tag from the pushed ref. Removed: tagging is
+  what publishes, and a manual run stops at the run artifact.
+- **Package size was stated two ways.** ~180 MB in two places, 320 MB
+  in two others. Measured: 179 MB unpacked, 76 MB zipped.
+
+### Documentation
+
+- `docs/TESTING.md` listed per-file counts totalling 541 against a
+  suite of 611, missing two files entirely. Regenerated from an actual
+  collection; the suite is 626.
+
 ## [0.9.1] — 2026-09-11
 
 Packaging, zero-configuration AI, and seven defects found by auditing

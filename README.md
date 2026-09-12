@@ -14,7 +14,7 @@ one.
 
 It supports supervisory judgement. **It does not replace it.**
 
-> **v0.9.1** · 626 tests · 112 UI smoke checks · no network connection of any
+> **v0.9.3** · 626 tests · 112 UI smoke checks · no network connection of any
 > kind, at any point.
 
 <h3 align="center">
@@ -53,7 +53,7 @@ not start without <code>_internal\</code> beside it.
 | [What SAT-SA does](#what-sat-sa-does) | the solution, end to end |
 | [What SAT-SA is not](#what-sat-sa-is-not) | scope boundaries |
 | [Architecture](#architecture) | where the authority sits |
-| [Capabilities in v0.9.1](#capabilities-in-v091) | what is actually implemented |
+| [Capabilities in v0.9.3](#capabilities-in-v093) | what is actually implemented |
 | [Installation](#installation) | source and packaged |
 | [Evaluator quick start](#evaluator-quick-start) | twelve steps |
 | [Detection](#detection) | the 14 rules and how they score |
@@ -206,7 +206,7 @@ Layers, threading and lifecycle: [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ---
 
-## Capabilities in v0.9.1
+## Capabilities in v0.9.3
 
 | Capability | Status |
 |---|---|
@@ -285,11 +285,15 @@ sudo apt install libxcb-xinerama0 libxkbcommon-x11-0 libegl1    # Debian/Ubuntu
 
 ### Windows — download and run
 
-Windows builds are distributed as GitHub Release assets, produced by a
-workflow that builds on a `windows-latest` runner. **No release has been
-published yet**, so the badge above reads *no releases* and the download link
-404s until one is. Until then, build one yourself on Windows:
-[packaging/BUILD.md](packaging/BUILD.md).
+Windows builds are distributed as GitHub Release assets, produced by
+`.github/workflows/windows-release.yml` on a `windows-latest` runner. The
+runner runs the full test suite and `SAT-SA.exe --self-check` against the
+finished build before attaching anything, so a package that cannot pass its
+own checks is never published.
+
+The release badge above is the authority on what exists. If it reads
+*no releases*, the download link 404s and you would build one yourself on
+Windows: [packaging/BUILD.md](packaging/BUILD.md).
 
 Once a release is published, the route is:
 
@@ -378,8 +382,8 @@ as a downloadable artifact.
 
 A manual run stops at the artifact and publishes nothing — the release step
 derives its tag from the pushed ref, so tagging is what publishes. Note that
-`v0.9.0` and `v0.9.1` are already tagged and pushing them again triggers
-nothing; publishing needs a new version.
+already-pushed tags trigger nothing when pushed again, so publishing needs a
+new version.
 
 ### Headless pipeline
 

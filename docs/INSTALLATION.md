@@ -138,8 +138,8 @@ inside it.
 Windows builds are published as GitHub Release assets, built by
 `.github/workflows/windows-release.yml` on a real `windows-latest` runner that
 runs the test suite and `--self-check` on the binary before attaching it. A tag
-is a source marker; the release is what carries the download. No release has
-been published yet, so this route is not yet live.
+is a source marker; the release is what carries the download. The releases
+page is the authority on which versions are available.
 
 If no release has been published for the version you want, build one yourself
 on Windows following [../packaging/BUILD.md](../packaging/BUILD.md).
@@ -313,11 +313,12 @@ shippable one. It then stages `SAT-SA-Setup-AI.ps1`, `INSTALL.txt` and
 Output is `dist\SAT-SA\` — a folder, 179 MB. Zipped for distribution it is
 76 MB; the CI workflow zips it for you.
 
-**Verification status as of v0.9.1.** A Windows PE32+ build has been produced
-from this spec and passes `SAT-SA.exe --self-check`, but under Wine, not on
-Windows — that exercises the import graph, bundled resources and Qt plugin
-loading, and is not the same as a native run. The CI workflow that builds on a
-real `windows-latest` runner is committed but has not yet been executed. See
+**Verification status.** A Windows PE32+ build has been produced from this
+spec and passes `SAT-SA.exe --self-check` — but under Wine, which exercises
+the import graph, bundled resources and Qt plugin loading without being a
+native run. Builds attached to a GitHub Release are produced on a real
+`windows-latest` runner and pass the same self-check there. Neither has been
+run on physical Windows hardware by the authors. See
 [../packaging/BUILD.md](../packaging/BUILD.md).
 
 ---
