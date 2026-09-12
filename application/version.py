@@ -2,7 +2,7 @@
 
 APP_NAME = "SAT-SA"
 APP_FULL_NAME = "SAT-SA — Supervisory Analytics Tool for SOC Assessment"
-APP_VERSION = "0.9.1"
+APP_VERSION = "0.9.2"
 APP_ORGANIZATION = "NCIIPC Supervisory Analytics"
 
 #: Shown wherever the product describes itself. Says what it is and,
